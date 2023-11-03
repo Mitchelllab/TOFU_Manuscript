@@ -1,0 +1,22 @@
+name	Group
+S1_1_val	Untreated
+S2_1_val	Untreated
+S3_1_val	Untreated
+S4_1_val	Untreated
+S5_1_val	Ctrl DCs IgG 
+S6_1_val	Ctrl DCs IgG 
+S7_1_val	Ctrl DCs IgG 
+S8_1_val	Ctrl DCs IgG 
+S9_1_val	Ctrl DCs PD1
+S10_1_val	Ctrl DCs PD1
+S11_1_val	Ctrl DCs PD1
+S12_1_val	Ctrl DCs PD1
+S13_1_val	Kluc DCs IgG
+S14_1_val	Kluc DCs IgG
+S15_1_val	Kluc DCs IgG
+S16_1_val	Kluc DCs IgG
+S17_1_val	Kluc DCs PD1
+S18_1_val	Kluc DCs PD1
+S19_1_val	Kluc DCs PD1
+S20_1_val	Kluc DCs PD1
+S21_1_val	Kluc DCs PD1
