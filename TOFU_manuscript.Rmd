@@ -1,0 +1,1596 @@
+---
+title: "NS2785_manuscript"
+output: html_document
+date: "2022-09-12"
+---
+
+## R packages
+```{r setup,include=false,warning=FALSE,message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(SingleR)
+library(Seurat)
+library(data.table)
+library(DropletUtils)
+library(celldex)
+library(ggpubr)
+library(rstatix)
+library(patchwork)
+library(conflicted)
+library(AUCell)
+library(pheatmap)
+library(CellChat)
+conflict_prefer("select","dplyr")
+conflict_prefer("filter","dplyr")
+set.seed(2022)
+theme_set(
+  theme_classic(base_size=25)
+)
+set.seed(2022)
+```
+
+## functions
+```{r}
+
+group_color <- c("#DDCC77","#888888","#CC6677")
+names(group_color) <- c("Untreated","9Gy TBI","TOFU-ACT")
+order <- c("Untreated","9Gy TBI","TOFU-ACT")
+
+box_all <- function(mat,...){
+  ggplot(mat,aes(...))+geom_boxplot(aes(fill=Group),outlier.shape = NA)+theme(axis.text.x = element_text(angle = 60,hjust = 1,color = "black")) +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_compare_means(aes(group=Group),method = "kruskal.test",label="p.signif")}
+
+wilcox <- function(mat,Gene,...){
+  Gene <- enquo(Gene)
+  mat %>% group_by(!!Gene)%>% wilcox_test(formula= ...,ref.group = "Untreated")%>%adjust_pvalue(method="bonferroni") %>% add_y_position(step.increase = 0)}
+
+mat_p <- function(mat,Gene,tumor_wilcox){mat[mat[,Gene] %in% tumor_wilcox[,Gene][which(tumor_wilcox$p.adj < 0.05)],]}
+box_b <- function(mat,Gene,TPM,tumor_wilcox){
+  ggboxplot(mat,"Group",TPM,fill="Group",facet.by = Gene,scales = "free_y",outlier.shape = NA) +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_pvalue_manual(tumor_wilcox,hide.ns = T,remove.bracket = T) +theme(strip.text.x=element_text(size=15, color="red", face="bold.italic"),axis.text.x = element_text(angle = 45, hjust = 1,color = "black"),axis.title.x = element_blank(),legend.text=element_text(size=15),title = element_text(size = 15))}
+
+targets.use = "CD8 Tcm"
+sources.use = c("M1 MF","DC","M2 MF")
+rankNet_new <- function(pic,obj1,obj2,targets.use = targets.use,sources.use = sources.use){
+  color.use = rev((ggPalette(2)))
+  tol <- 0.05
+  cutoff.pvalue <- 0.05
+  df <- pic$data
+for(i in unique(pic$data$name)){
+ df1 <- obj1[obj1$pathway_name == i & obj1$target == targets.use & obj1$source %in% sources.use,] %>% select(id,prob,pathway_name)
+  df2 <- obj2[obj2$pathway_name == i & obj2$target == targets.use & obj2$source %in% sources.use,]%>% select(id,prob,pathway_name)
+  if(!rlang::is_empty(setdiff(df2$id,df1$id))){
+  df1 <- rbind(df1,data.frame(id=setdiff(df2$id,df1$id),prob=0,pathway_name=i)) %>% arrange(.$id)
+  } else {df1 <- df1 %>% arrange(.$id)}
+  if(!rlang::is_empty(setdiff(df1$id,df2$id))){
+  df2 <- rbind(df2,data.frame(id=setdiff(df1$id,df2$id),prob=0,pathway_name=i))%>% arrange(.$id)
+  } else {df2 <- df2 %>% arrange(.$id)}
+df$pvalues[df$name == i] <- wilcox.test(df1$prob,df2$prob,paired = T)$p.value
+}
+df$group <- factor(df$group,levels = names(object.list))
+
+colors.text <- ifelse((df$contribution.relative < 
+                  1 - tol) & (df$pvalues < cutoff.pvalue), color.use[2], 
+                  ifelse((df$contribution.relative > 1 + tol) & 
+                    df$pvalues < cutoff.pvalue, color.use[1], 
+                    "black"))
+
+pic<- ggplot(df, aes(x = name, y = contribution, 
+                fill = group)) + geom_bar(stat = "identity", 
+                width = 0.75, position = "fill")+ xlab("") + ylab("Relative information flow")+geom_hline(yintercept = 0.5, linetype = "dashed", color = "grey50", size = 0.5)+ CellChat_theme_opts() + theme_classic() + coord_flip() + theme(axis.text.y = element_text(colour = (colors.text)))+ scale_fill_manual(name = "", values = rev(color.use))}
+
+```
+
+
+## Date Prep
+
+```{r,data prep}
+setwd("/Users/changlin/Dropbox (UFL)/Master/Oran-Vrunda/NS2785 scRNAseq")
+#load("NS2785.RData")
+
+immune.combined <- subset(immune.combined,cells = rownames(immune.combined@meta.data %>% filter(Group != "ttRNA-ACT") ))
+
+immune.combined.t <- subset(immune.combined.t,cells = rownames(immune.combined.t@meta.data %>% filter(Group != "ttRNA-ACT") ))
+
+pool4_obj <- subset(pool4_obj,cells = rownames(pool4_obj@meta.data %>% filter(Group != "ttRNA-ACT") ))
+
+##set color
+group_color <- c("#DDCC77","#888888","#CC6677")
+names(group_color) <- c("Untreated","9Gy TBI","TOFU-ACT")
+order <- c("Untreated","9Gy TBI","TOFU-ACT")
+#tumor_color <- col_table$tumor_color
+#names(tumor_color) <- col_table$new.ident
+
+pool4_obj$Group <- str_replace_all(pool4_obj$Group,c("HSC alone"="9Gy TBI"))
+pool4_obj$group <- str_replace_all(pool4_obj$group,c("HSC alone"="9Gy TBI"))
+
+
+immune.combined.t$Group <- str_replace_all(immune.combined.t$Group,c("HSC alone"="9Gy TBI"))
+
+immune.combined$Group <- str_replace_all(immune.combined$Group,c("HSC alone"="9Gy TBI"))
+immune.combined$Group <- str_replace_all(immune.combined$Group,c("HSC alone"="9Gy TBI"))
+```
+
+## Tumor
+```{r}
+##Umap
+##
+pool4_obj$group <- factor(pool4_obj$group,levels = c("Untreated (n=1000)","9Gy TBI (n=1000)","TOFU-ACT (n=1000)"))
+
+
+##revise for changing microglia to immune cells
+pool4_obj$new.ident <- str_replace_all(pool4_obj$new.ident,c("Microglia" = "Immune cells"))
+Idents(pool4_obj) <- pool4_obj$new.ident
+
+
+pool4_obj$celltype <- str_replace_all(pool4_obj$celltype,c("Microglia" = "Immune cells"))
+
+names(tumor_color) <- str_replace_all(names(tumor_color),c("Microglia" = "Immune cells"))
+#######
+
+
+
+p1_tumor <- DimPlot(pool4_obj, reduction = "umap", repel = TRUE,split.by = "group",label = TRUE,label.size = 7,cols = tumor_color) & theme(legend.position = "none",title = element_text(size = 15),strip.text.x=element_text(size=20,color="black"))
+
+
+##Pathway
+# mat <- pool4_obj@meta.data %>% filter(celltype=="Tumor")
+# table_tumor <- mat %>% dplyr::select(Group,c(13:32)) %>%pivot_longer(!Group,names_to = "Pathway",values_to = "Score")
+# 
+# table_tumor$Group <- factor(table_tumor$Group,levels = c("Untreated","9Gy TBI","TOFU-ACT"))
+# table_tumor$Pathway <- factor(table_tumor$Pathway)
+# 
+# p2_tumor <- ggplot(table_tumor,aes(x=Pathway,y=Score,fill=Group))+geom_boxplot()+scale_y_log10(oob=scales::squish_infinite)+theme(axis.text.x = element_text(angle = 15,hjust = 1,size=15,color = "black")) +xlab("")+stat_compare_means(aes(group=Group),method = "anova",label="p.signif")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)
+# table_tumor_t.test <- table_tumor %>% group_by(Pathway)%>%t_test(Score ~ Group,ref.group = "Untreated")%>%adjust_pvalue(method="bonferroni") %>% add_y_position()
+# 
+# p3_tumor <- ggboxplot(table_tumor,x="Group",y="Score",fill="Group",facet.by = "Pathway",scales = "free_y") +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_pvalue_manual(table_tumor_t.test,tip.length = 0.01,hide.ns = T,remove.bracket =T) +
+#   scale_y_continuous(expand = expansion(mult = c(0.05, 0.1)))+theme(strip.text.x=element_text(size=15, color="red", face="bold.italic"),
+#         axis.text.x = element_text(angle = 45, hjust = 1,color = "black"),
+#         axis.title.x = element_blank())
+
+```
+### TOFU
+```{r}
+tofu <- fread("kluc_tofu.txt")
+tofu_freq_untreated <- fread("tofu_freq_on_tumor.txt") %>% select(gene_symbol,untreated_freq) %>% arrange(desc(untreated_freq)) %>% left_join(tofu)
+pool4_obj <- AddModuleScore(pool4_obj,features = list(tofu$gene_symbol),name = "All_TOFU")
+
+tofu_exp_untreated <- fread("tofu_exp_on_tumor.txt")%>% transmute(barcode,All_TOFU=rowSums(.[,2:27])) %>% column_to_rownames(var="barcode")
+
+#pool4_obj$All_TOFU <- pool4_obj$All_TOFU1
+
+
+pool4_obj <- AddMetaData(pool4_obj,tofu_exp_untreated)
+
+
+untreated_tumor_id <- rownames(pool4_obj@meta.data %>% filter(Group=="Untreated",celltype=="Tumor"))
+
+# p4_tumor <- FeaturePlot(pool4_obj,features = c("Sf3b3","Mdfic","Ldha"),cols = c("grey","blue")) + FeaturePlot(pool4_obj,features = c("All_TOFU"),cols = c("grey","blue"))
+
+p4_tumor <- FeaturePlot(pool4_obj,features = c("Sf3b3","Mdfic","Ldha"),cols = c("grey","blue"),cells = untreated_tumor_id) + FeaturePlot(pool4_obj,features = c("All_TOFU"),cols = c("grey","blue"),cells = untreated_tumor_id)
+## TOFU coverage on tumor = (691-5)/691 =99.28%
+
+# tofu_freq_untreated <- rbind(tofu_freq_untreated,data.frame(gene_name="All_TOFU",untreated_freq=(691-5)/691))
+
+```
+
+
+## Pathway
+```{r}
+exhaustion <- fread("mouse_exhaustion_modified.txt") %>% pivot_longer(!`Gene`,names_to = "Pathway") %>%filter(value != 0) %>% arrange(Pathway)%>% dplyr::select(-value)
+exhaustion_gsva <- split(exhaustion$Gene,exhaustion$Pathway)
+immunology <- fread("mouse_immunology_modified.txt") %>% pivot_longer(!`Gene`,names_to = "Pathway") %>%filter(value != 0) %>% arrange(Pathway)%>% dplyr::select(-value)
+immunology_gsva <- split(immunology$Gene,immunology$Pathway)
+pancancer <- fread("mouse_pancancer_immune_modified.txt") %>% pivot_longer(!`Gene`,names_to = "Pathway") %>%filter(value != 0) %>% arrange(Pathway)%>% dplyr::select(-value)
+pancancer_gsva <- split(pancancer$Gene,pancancer$Pathway)
+require(clusterProfiler)
+neotcr <- read.gmt("neotcr.gmt") %>% filter(term != "",gene != "")
+neotcr_gsva <- split(str_to_title(neotcr$gene),str_to_title(neotcr$term))
+```
+### Tumor Pathway
+```{r}
+pool4_obj@meta.data <-  pool4_obj@meta.data %>% select(-unique(pancancer$Pathway))
+pool4_obj@active.assay <- "RNA"
+
+## ifng response
+mat <- GetAssayData(pool4_obj, assay = "RNA", slot = "data") %>% t() %>% as.data.frame() %>% select(Stat1,Irf1,Gbp4,Tap1,Cxcl9,Cxcl10) %>% rownames_to_column(var = "barcode") %>% pivot_longer(-barcode,names_to = "Gene",values_to = "TPM") %>% left_join(pool4_obj@meta.data %>% rownames_to_column(var="barcode") %>%select(barcode,Group))
+mat$Group <- factor(mat$Group,levels = c("Untreated","9Gy TBI","TOFU-ACT"))
+
+tumor_p5 <- box_all(mat,Gene,TPM)+scale_y_log10()
+tumor_wilcox <- wilcox(mat,Gene,TPM~Group)
+mat <- mat%>% filter(str_detect(Gene,tumor_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Gene)))
+tumor_p6 <- box_b(mat,"Gene","TPM",tumor_wilcox)+scale_y_log10()
+
+
+# tumor_p5  <- ggplot(mat,aes(x=Gene,y=TPM,fill=Group))+geom_boxplot(outlier.shape = NA)+theme(axis.text.x = element_text(angle = 45,hjust = 1,color = "black")) +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_compare_means(aes(group=Group),method = "kruskal.test",label="p.signif")+scale_y_log10()
+
+
+#tumor_wilcox <- mat %>% group_by(Gene)%>%wilcox_test(TPM ~ Group,ref.group = "Untreated")%>%adjust_pvalue(method="bonferroni") %>% add_y_position()
+
+# tumor_p6<- ggplot(mat,aes(x=Group,y=TPM))+geom_boxplot(aes(fill=Group))+facet_wrap(~Gene,scales = "free")+scale_y_log10()+xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_pvalue_manual(tumor_wilcox,tip.length = 0.01,hide.ns = T,remove.bracket = T) +theme(strip.text.x=element_text(size=15, color="red", face="bold.italic"),
+#         axis.text.x = element_text(angle = 45, hjust = 1,color = "black"),
+#         axis.title.x = element_blank(),legend.text=element_text(size=15),title = element_text(size = 15))
+
+
+
+
+# tumor_p6 <- ggboxplot(mat,x="Group",y="TPM",fill="Group",facet.by = "Gene",scales = "free_y",outlier.shape = NA) +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_pvalue_manual(tumor_wilcox,hide.ns = T,remove.bracket = T) +theme(strip.text.x=element_text(size=15, color="red", face="bold.italic"),axis.text.x = element_text(angle = 45, hjust = 1,color = "black"),axis.title.x = element_blank(),legend.text=element_text(size=15),title = element_text(size = 15))+scale_y_log10()
+
+## Tumor pancancer
+# #tumor.es.pancancer <-  escape::enrichIt(obj=pool4_obj,gene.sets = pancancer_gsva,groups =3000,cores = 8)
+# #write.table(tumor.es.pancancer,"tumor_pancancer.txt",col.names = T,row.names = F,quote = F,sep = "\t")
+
+# tumor_rankings <- AUCell_buildRankings(pool4_obj@assays$RNA@data)
+# tumor_pancancer_cells_AUC <- AUCell_calcAUC(pancancer_gsva,tumor_rankings,nCores = 8)
+# tumor_pancancer<- getAUC(tumor_pancancer_cells_AUC) %>% t() %>% cbind(pool4_obj@meta.data %>% select(Group,celltype)) %>% filter(celltype=="Tumor") 
+# write.table(tumor_pancancer,"tumor_pancancer.txt",col.names = NA,row.names = T,quote = F,sep = "\t")
+tumor_pancancer <- fread("tumor_pancancer.txt") %>% column_to_rownames(var="V1")
+tumor_pancancer_mat <- tumor_pancancer %>% filter(str_detect(celltype,c("Tumor"))) %>% arrange(factor(Group,levels = c("Untreated","9Gy TBI","TOFU-ACT")),factor(celltype,levels = c("Tumor"))) 
+anno_color <- list(Group = c(Untreated ="#DDCC77",`9Gy TBI` = "#888888",`TOFU-ACT` = "#CC6677"))
+
+p_tumor_pancancer <- pheatmap((tumor_pancancer_mat[,c(1:20)] %>% t()),annotation_col = (pool4_obj@meta.data %>% dplyr::select(celltype,Group)),cluster_rows = F,cluster_cols = F,show_rownames = T,show_colnames = F,scale = "row",breaks =unique(c(seq(-1,1,length=100))),annotation_colors = anno_color,fontsize = 12)
+
+
+
+
+tumor_pancancer <- tumor_pancancer %>% pivot_longer(-c("celltype","Group"),names_to = "Pathway",values_to = "AUC")
+tumor_pancancer$Group <- factor(tumor_pancancer$Group,levels = c("Untreated","9Gy TBI","TOFU-ACT"))
+
+
+tumor_p7 <- box_all(tumor_pancancer,Pathway,AUC)
+tumor_wilcox <- wilcox(tumor_pancancer,Pathway,AUC~Group)
+tumor_pancancer <- tumor_pancancer %>% filter(Pathway %in% (tumor_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Pathway) %>% unique()))
+tumor_p8 <- box_b(tumor_pancancer,"Pathway","AUC",tumor_wilcox)
+
+
+
+```
+
+## CD45+
+```{r}
+immune.combined$group <- factor(immune.combined$group,c("Untreated (n=15,000)","9Gy TBI (n=15,000)","TOFU-ACT (n=15,000)"))
+
+Idents(immune.combined) <- immune.combined$celltype
+immune.combined$new.ident <- NULL
+#### immune color
+control_freq <- immune.combined@meta.data %>% filter(Group=="Untreated") %>% freq_table(celltype) %>%
+  mutate(new.ident=paste0(celltype," (",prop,"%)"))
+control_freq <- immune.combined@meta.data %>% filter(Group=="Untreated") %>% left_join(control_freq,by="celltype") %>% dplyr::select(celltype,new.ident)
+rownames(control_freq) <- rownames(immune.combined@meta.data %>% filter(Group=="Untreated"))
+hsc_freq <- immune.combined@meta.data %>% filter(Group=="9Gy TBI") %>% freq_table(celltype) %>%
+  mutate(new.ident=paste0(celltype," (",prop,"%)"))
+hsc_freq <- immune.combined@meta.data %>% filter(Group=="9Gy TBI") %>% left_join(hsc_freq,by="celltype") %>% dplyr::select(celltype,new.ident)
+rownames(hsc_freq) <- rownames(immune.combined@meta.data %>% filter(Group=="9Gy TBI"))
+
+tofu_freq <- immune.combined@meta.data %>% filter(Group=="TOFU-ACT") %>% freq_table(celltype) %>%
+  mutate(new.ident=paste0(celltype," (",prop,"%)"))
+tofu_freq <- immune.combined@meta.data %>% filter(Group=="TOFU-ACT") %>% left_join(tofu_freq,by="celltype") %>% dplyr::select(celltype,new.ident)
+rownames(tofu_freq) <- rownames(immune.combined@meta.data %>% filter(Group=="TOFU-ACT"))
+
+
+immune_color <- c("#888888", "#CC6677", "#88CCEE", "#117733", "#332288", "#AA4499", 
+                             "#44AA99", "#999933", "#882255", "#661100","black")
+names(immune_color) <- immune.combined$celltype %>% levels()
+
+
+
+immune_freq <- rbind(control_freq,hsc_freq,tofu_freq)
+immune_freq <- immune_freq %>% pull(new.ident)
+names(immune_freq) <- rownames(immune.combined@meta.data)
+immune.combined <- AddMetaData(immune.combined,immune_freq,col.name = "new.ident")
+immune.combined@active.ident <- as.factor(immune_freq)
+
+
+immune_col_table <- immune.combined@meta.data %>% left_join(data.frame(celltype=names(immune_color),immune_color=immune_color)) %>% dplyr::select(new.ident,immune_color) %>% unique()
+
+immune_color <- immune_col_table$immune_color
+names(immune_color) <- immune_col_table$new.ident
+
+
+
+
+
+
+
+
+
+
+#### immune color
+####
+
+
+
+
+
+
+
+
+immune_p1 <- DimPlot(immune.combined, reduction = "umap", repel = TRUE,split.by = "group",label = TRUE,label.size = 7,cols = immune_color) & theme(legend.position = "none",title = element_text(size = 20),strip.text.x=element_text(size=20))
+
+mat <- immune.combined@meta.data %>% group_by(Sample) %>% dplyr::select(celltype)%>% table() %>% as.data.frame() %>% left_join(immune.combined@meta.data %>% dplyr::select(Sample,Group) %>% unique()) %>% as.tibble()
+mat$Group <- factor(mat$Group,levels = c("Untreated","9Gy TBI","TOFU-ACT"))
+
+immune_p2  <- ggplot(mat,aes(x=celltype,y=Freq,fill=Group))+geom_boxplot()+scale_y_log10(oob=scales::squish_infinite)+theme(axis.text.x = element_text(angle = 45,hjust = 1,color = "black")) +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)
+immune.combined.celltype_wilcox <- mat %>% group_by(celltype)%>%wilcox_test(Freq ~ Group,ref.group = "Untreated")%>%adjust_pvalue(method="bonferroni") %>% add_y_position()
+
+immune_p3 <- ggboxplot(mat,x="Group",y="Freq",fill="Group",facet.by = "celltype",scales = "free_y") +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_pvalue_manual(immune.combined.celltype_wilcox,tip.length = 0.01,hide.ns = T) +scale_y_continuous(expand = expansion(mult = c(0.05, 0.2)))+theme(strip.text.x=element_text(size=15, color="red", face="bold.italic"),
+        axis.text.x = element_text(angle = 45, hjust = 1,color = "black"),
+        axis.title.x = element_blank(),legend.text=element_text(size=15),title = element_text(size = 15))+scale_y_log10(oob=scales::squish_infinite)
+
+```
+### CD45 Pathway
+```{r}
+## ifng response
+mat <- GetAssayData(immune.combined, assay = "RNA", slot = "data") %>% t() %>% as.data.frame() %>% select(Stat1,Irf1,Gbp4,Tap1,Cxcl9,Cxcl10) %>% rownames_to_column(var = "barcode") %>% pivot_longer(-barcode,names_to = "Gene",values_to = "TPM") %>% left_join(immune.combined@meta.data %>% rownames_to_column(var="barcode") %>%select(barcode,Group,celltype))
+
+mat$Group <- factor(mat$Group,levels = c("Untreated","9Gy TBI","TOFU-ACT"))
+# immune_p4 <- ggplot(mat,aes(x=Gene,y=TPM,fill=Group))+geom_boxplot(outlier.shape = NA)+theme(axis.text.x = element_text(angle = 45,hjust = 1,color = "black")) +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_compare_means(aes(group=Group),method = "kruskal.test",label="p.signif")+scale_y_log10()
+# 
+# 
+# immune_wilcox <- mat %>% group_by(Gene)%>%wilcox_test(TPM ~ Group,ref.group = "Untreated")%>%adjust_pvalue(method="bonferroni") %>% add_y_position()
+# 
+# immune_p5 <- ggboxplot(mat,x="Group",y="TPM",fill="Group",facet.by = "Gene",scales = "free_y",outlier.shape = NA) +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_pvalue_manual(immune_wilcox,tip.length = 0.01,hide.ns = T) +theme(strip.text.x=element_text(size=15, color="red", face="bold.italic"),
+#         axis.text.x = element_text(angle = 45, hjust = 1,color = "black"),
+#         axis.title.x = element_blank(),legend.text=element_text(size=15),title = element_text(size = 15))
+
+
+
+immune_p4 <- box_all(mat,Gene,TPM)+scale_y_log10()
+immune_wilcox <- wilcox(mat,Gene,TPM~Group)
+temp <- mat %>% filter(Gene %in% (immune_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Gene) %>% unique()))
+immune_p5 <- box_b(temp,"Gene","TPM",immune_wilcox)+scale_y_log10()
+
+## M1 M2 DC
+
+M1_p1 <- ggplot((mat %>% filter(celltype=="M1 Macrophages")),aes(x=Gene,y=TPM,fill=Group))+geom_boxplot(outlier.shape = NA)+theme(axis.text.x = element_text(angle = 45,hjust = 1,color = "black")) +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_compare_means(aes(group=Group),method = "kruskal.test",label="p.signif")+scale_y_log10()
+
+immune_wilcox <- (mat %>% filter(celltype=="M1 Macrophages")) %>% group_by(Gene,celltype)%>%wilcox_test(TPM ~ Group,ref.group = "Untreated")%>%adjust_pvalue(method="bonferroni") %>% add_y_position()
+
+M1_p2 <-ggboxplot((mat %>% filter(celltype=="M1 Macrophages")),x="Group",y="TPM",fill="Group",facet.by = "Gene",scales = "free_y",outlier.shape = NA) +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_pvalue_manual(immune_wilcox,tip.length = 0.01,hide.ns = T) +theme(strip.text.x=element_text(size=15, color="red", face="bold.italic"),
+        axis.text.x = element_text(angle = 45, hjust = 1,color = "black"),
+        axis.title.x = element_blank(),legend.text=element_text(size=15),title = element_text(size = 15))
+
+M2_p1 <- ggplot((mat %>% filter(celltype=="M2 Macrophages")),aes(x=Gene,y=TPM,fill=Group))+geom_boxplot(outlier.shape = NA)+theme(axis.text.x = element_text(angle = 45,hjust = 1,color = "black")) +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_compare_means(aes(group=Group),method = "kruskal.test",label="p.signif")+scale_y_log10()
+immune_wilcox <- (mat %>% filter(celltype=="M2 Macrophages")) %>% group_by(Gene,celltype)%>%wilcox_test(TPM ~ Group,ref.group = "Untreated")%>%adjust_pvalue(method="bonferroni") %>% add_y_position()
+
+M1_p2 <-ggboxplot((mat %>% filter(celltype=="M2 Macrophages")),x="Group",y="TPM",fill="Group",facet.by = "Gene",scales = "free_y",outlier.shape = NA) +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_pvalue_manual(immune_wilcox,tip.length = 0.01,hide.ns = T) +theme(strip.text.x=element_text(size=15, color="red", face="bold.italic"),
+        axis.text.x = element_text(angle = 45, hjust = 1,color = "black"),
+        axis.title.x = element_blank(),legend.text=element_text(size=15),title = element_text(size = 15))
+DC_p1<- ggplot((mat %>% filter(celltype=="DC")),aes(x=Gene,y=TPM,fill=Group))+geom_boxplot(outlier.shape = NA)+theme(axis.text.x = element_text(angle = 45,hjust = 1,color = "black")) +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_compare_means(aes(group=Group),method = "kruskal.test",label="p.signif")+scale_y_log10()
+immune_wilcox <- (mat %>% filter(celltype=="DC")) %>% group_by(Gene,celltype)%>%wilcox_test(TPM ~ Group,ref.group = "Untreated")%>%adjust_pvalue(method="bonferroni") %>% add_y_position()
+
+DC_p2 <-ggboxplot((mat %>% filter(celltype=="DC")),x="Group",y="TPM",fill="Group",facet.by = "Gene",scales = "free_y",outlier.shape = NA) +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_pvalue_manual(immune_wilcox,tip.length = 0.01,hide.ns = T) +theme(strip.text.x=element_text(size=15, color="red", face="bold.italic"),
+        axis.text.x = element_text(angle = 45, hjust = 1,color = "black"),
+        axis.title.x = element_blank(),legend.text=element_text(size=15),title = element_text(size = 15))
+
+## pancancer pathway
+
+# immune_rankings <- AUCell_buildRankings(immune.combined@assays$RNA@data,nCores = 7,plotStats = F)
+# gc()
+# immune_pancancer_cells_AUC <- AUCell_calcAUC(pancancer_gsva,immune_rankings,nCores = 7)
+# immune_pancancer<- getAUC(immune_pancancer_cells_AUC) %>% t() %>% cbind(immune.combined@meta.data %>% select(Group,celltype))
+# write.table(immune_pancancer,"immune_cells_pancancer.txt",col.names = NA,row.names = T,quote = F,sep = "\t")
+immune_pancancer <- fread("immune_cells_pancancer.txt") %>% column_to_rownames(var="V1")
+immune_pancancer <- immune_pancancer %>% pivot_longer(-c("celltype","Group"),names_to = "Pathway",values_to = "AUC")
+immune_pancancer$Group <- factor(immune_pancancer$Group,levels = c("Untreated","9Gy TBI","TOFU-ACT"))
+
+
+immune_p6 <- box_all(immune_pancancer,Pathway,AUC)
+immune_wilcox <- wilcox(immune_pancancer,Pathway,AUC~Group)
+temp <- immune_pancancer %>% filter(Pathway %in% (immune_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Pathway) %>% unique()))
+immune_p7 <- box_b(temp,"Pathway","AUC",immune_wilcox)
+
+
+
+# immune_p6  <- ggplot(immune_pancancer,aes(x=Pathway,y=AUC,fill=Group))+geom_boxplot(outlier.shape = NA)+theme(axis.text.x = element_text(angle = 45,hjust = 1,color = "black")) +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_compare_means(aes(group=Group),method = "kruskal.test",label="p.signif")
+# 
+# immune_wilcox <- immune_pancancer %>% group_by(Pathway)%>%wilcox_test(AUC ~ Group,ref.group = "Untreated")%>%adjust_pvalue(method="bonferroni") %>% add_y_position()
+# 
+# immune_p7 <- ggboxplot(immune_pancancer,x="Group",y="AUC",fill="Group",facet.by = "Pathway",scales = "free_y") +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_pvalue_manual(immune_wilcox,tip.length = 0.01,hide.ns = T) +theme(strip.text.x=element_text(size=15, color="red", face="bold.italic"),
+#         axis.text.x = element_text(angle = 45, hjust = 1,color = "black"),
+#         axis.title.x = element_blank(),legend.text=element_text(size=15),title = element_text(size = 15))
+## immunology pathway
+# immune_immunology_cells_AUC <- AUCell_calcAUC(immunology_gsva,immune_rankings,nCores = 7)
+# immune_immunology<- getAUC(immune_immunology_cells_AUC) %>% t() %>% cbind(immune.combined@meta.data %>% select(Group,celltype))
+# write.table(immune_immunology,"immune_cells_immunology.txt",col.names = NA,row.names = T,quote = F,sep = "\t")
+immune_immunology <- fread("immune_cells_immunology.txt") %>% column_to_rownames(var="V1")
+
+immune_immunology_mat <- immune_immunology %>% filter(str_detect(celltype,c("Macrophages","DC"))) %>% arrange(factor(Group,levels = c("Untreated","9Gy TBI","TOFU-ACT")),factor(celltype,levels = c("M1 Macrophages","M2 Macrophages","DC"))) 
+anno_color <- list(Group = c(Untreated ="#DDCC77",`9Gy TBI` = "#888888",`TOFU-ACT` = "#CC6677"),
+                   celltype = c(`M1 Macrophages` = "orange",`M2 Macrophages` = "red",`DC` = "blue"))
+
+p_immune_immunology <- pheatmap((immune_immunology_mat[,c(1:31)] %>% t()),annotation_col = (immune.combined@meta.data %>% dplyr::select(celltype,Group)),cluster_rows = F,cluster_cols = F,show_rownames = T,show_colnames = F,scale = "row",breaks =unique(c(seq(-1,1,length=100))),annotation_colors = anno_color,fontsize = 12)
+
+
+
+immune_immunology <- immune_immunology %>% pivot_longer(-c("celltype","Group"),names_to = "Pathway",values_to = "AUC")
+immune_immunology$Group <- factor(immune_immunology$Group,levels = c("Untreated","9Gy TBI","TOFU-ACT"))
+
+immune_p8 <- box_all(immune_immunology,Pathway,AUC)
+immune_wilcox <- wilcox(immune_immunology,Pathway,AUC~Group)
+temp <- immune_immunology %>% filter(Pathway %in% (immune_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Pathway) %>% unique()))
+immune_p9 <- box_b(temp,"Pathway","AUC",immune_wilcox)
+# immune_p8  <- ggplot(immune_immunology,aes(x=Pathway,y=AUC,fill=Group))+geom_boxplot(outlier.shape = NA)+theme(axis.text.x = element_text(angle = 70,hjust = 1,color = "black")) +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_compare_means(aes(group=Group),method = "kruskal.test",label="p.signif")
+# 
+# immune_wilcox <- immune_immunology %>% group_by(Pathway)%>%wilcox_test(AUC ~ Group,ref.group = "Untreated")%>%adjust_pvalue(method="bonferroni") %>% add_y_position()
+# 
+# immune_p9 <- ggboxplot(immune_immunology,x="Group",y="AUC",fill="Group",facet.by = "Pathway",scales = "free_y") +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_pvalue_manual(immune_wilcox,tip.length = 0.01,hide.ns = T) +theme(strip.text.x=element_text(size=15, color="red", face="bold.italic"),
+#         axis.text.x = element_text(angle = 45, hjust = 1,color = "black"),
+#         axis.title.x = element_blank(),legend.text=element_text(size=15),title = element_text(size = 15))
+#### M1 M2 DC immunology
+#M1
+
+immune_p10<- box_all(immune_immunology %>% filter(celltype =="M1 Macrophages"),Pathway,AUC)
+immune_wilcox <- wilcox(immune_immunology %>% filter(celltype =="M1 Macrophages"),Pathway,AUC~Group)
+temp <- immune_immunology %>% filter(Pathway %in% (immune_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Pathway) %>% unique()))
+immune_p11 <- box_b(temp %>% filter(celltype =="M1 Macrophages"),"Pathway","AUC",immune_wilcox )
+
+# M2
+immune_p12<- box_all(immune_immunology %>% filter(celltype =="M2 Macrophages"),Pathway,AUC)
+immune_wilcox <- wilcox(immune_immunology %>% filter(celltype =="M2 Macrophages"),Pathway,AUC~Group)
+temp <- immune_immunology %>% filter(Pathway %in% (immune_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Pathway) %>% unique()))
+immune_p13 <- box_b(temp%>% filter(celltype =="M2 Macrophages"),"Pathway","AUC",immune_wilcox )
+
+
+# DC
+immune_p14<- box_all(immune_immunology %>% filter(celltype =="DC"),Pathway,AUC)
+immune_wilcox <- wilcox(immune_immunology %>% filter(celltype =="DC"),Pathway,AUC~Group)
+temp <- immune_immunology %>% filter(Pathway %in% (immune_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Pathway) %>% unique()))
+immune_p15 <- box_b(temp%>% filter(celltype =="DC"),"Pathway","AUC",immune_wilcox )
+```
+
+## T cells
+```{r}
+immune.combined.t$celltype[is.na(immune.combined.t$celltype)] <- "NK"
+t_col_table <- data.frame(celltype=immune.combined.t$celltype %>% unique(),t_color=scales::hue_pal()(7))
+t_col_table <- immune.combined.t@meta.data %>% select(celltype,new.ident) %>% unique() %>% left_join(t_col_table)
+t_color <- t_col_table$t_color
+names(t_color) <- t_col_table$new.ident
+immune.combined.t@active.ident <- as.factor(immune.combined.t$celltype)
+immune.combined.t$group <- factor(immune.combined.t$group,levels = c("Untreated (n=1318)","9Gy TBI (n=186)","TOFU-ACT (n=712)"))
+
+immune.combined.t <- subset(immune.combined.t,cells= (immune.combined.t@meta.data %>% filter(celltype != "NA") %>% rownames()))
+Idents(immune.combined.t) <- immune.combined.t$new.ident
+t_p1 <- DimPlot(immune.combined.t, reduction = "umap", repel = TRUE,split.by = "group",label = TRUE,label.size = 7,cols = t_color) & theme(legend.position = "none",title = element_text(size = 20),strip.text.x=element_text(size=20))
+
+pdf("t_umap.pdf",width = 18,height = 6)
+t_p1
+dev.off()
+
+mat <- immune.combined.t@meta.data %>% group_by(Sample) %>% dplyr::select(celltype)%>% table() %>% as.data.frame() %>% left_join(immune.combined.t@meta.data %>% dplyr::select(Sample,Group) %>% unique()) %>% as.tibble()
+mat$Group <- factor(mat$Group,levels = c("Untreated","9Gy TBI","ttRNA-ACT","TOFU-ACT"))
+t_p2  <- ggplot(mat,aes(x=celltype,y=Freq,fill=Group))+geom_boxplot()+scale_y_log10(oob=scales::squish_infinite)+theme(axis.text.x = element_text(angle = 45,hjust = 1,color = "black")) +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)
+immune.combined.t.celltype_wilcox <- mat %>% group_by(celltype)%>%wilcox_test(Freq ~ Group,ref.group = "TOFU-ACT")%>%adjust_pvalue(method="bonferroni") %>% add_y_position()
+
+t_p3 <- ggboxplot(mat,x="Group",y="Freq",fill="Group",facet.by = "celltype",scales = "free_y") +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_pvalue_manual(immune.combined.t.celltype_wilcox,tip.length = 0.01,hide.ns = T) +scale_y_continuous(expand = expansion(mult = c(0.05, 0.2)))+theme(strip.text.x=element_text(size=15, color="red", face="bold.italic"),
+        axis.text.x = element_text(angle = 45, hjust = 1,color = "black"),
+        axis.title.x = element_blank(),legend.text=element_text(size=15),title = element_text(size = 15))+scale_y_log10(oob=scales::squish_infinite)
+
+
+```
+
+
+### T cells Pathway
+```{r}
+
+## T cell Exhaustion
+t_rankings <- AUCell_buildRankings(immune.combined.t@assays$RNA@data,nCores = 7,plotStats = F)
+# t_exhaustion_cells_AUC <- AUCell_calcAUC(exhaustion_gsva,t_rankings,nCores = 7)
+# t_exhaustion<- getAUC(t_exhaustion_cells_AUC) %>% t() %>% cbind(immune.combined.t@meta.data %>% select(Group,celltype)) 
+# write.table(t_exhaustion,"t_cells_exhaustion.txt",col.names = NA,row.names = T,quote = F,sep = "\t")
+t_exhaustion <- fread("t_cells_exhaustion.txt") %>% column_to_rownames(var="V1")
+exhaustion_anno <- fread("mouse_exhaustion_function_theme.txt") %>% column_to_rownames(var="Pathway")
+
+
+
+t_exhaustion_tcm <- t_exhaustion %>% filter(str_detect(celltype,"Tcm"))%>% arrange(factor(Group,levels = c("Untreated","9Gy TBI","TOFU-ACT")),factor(celltype,levels = c("Cd8 Tcm","Cd4 Tcm")))
+
+immune.combined.t@meta.data$Group <- factor(immune.combined.t@meta.data$Group,levels = c("Untreated","9Gy TBI","TOFU-ACT"))
+
+immune.combined.t@meta.data$celltype <- factor(immune.combined.t@meta.data$celltype,levels = c("Cd8 Tem/eff","Cd4 Tem/eff","Cd8 Tcm","Cd4 Tcm","Treg","NKT","NK"))
+t_exhaustion_mat <- t_exhaustion %>% filter(str_detect(celltype,"Cd")) %>% arrange(factor(Group,levels = c("Untreated","9Gy TBI","TOFU-ACT")),factor(celltype,levels = c("Cd8 Tem/eff","Cd8 Tcm","Cd4 Tem/eff","Cd4 Tcm"))) 
+anno_color <- list(Group = c(Untreated ="#DDCC77",`9Gy TBI` = "#888888",`TOFU-ACT` = "#CC6677"),
+                   celltype = c(`Cd8 Tem/eff` = "orange",`Cd8 Tcm` = "red",`Cd4 Tem/eff` = "blue",`Cd4 Tcm` = "green"))
+
+p_t_exhaustion <- pheatmap((t_exhaustion_mat[,c(1:40)] %>% select(rownames(exhaustion_anno))%>% t()),annotation_col = (immune.combined.t@meta.data %>% dplyr::select(celltype,Group)),cluster_rows = F,cluster_cols = F,show_rownames = T,show_colnames = F,scale = "row",breaks =unique(c(seq(-1,1,length=100))),annotation_row = exhaustion_anno,annotation_colors = anno_color,fontsize = 12)
+
+anno_color <- list(Group = c(Untreated ="#DDCC77",`9Gy TBI` = "#888888",`TOFU-ACT` = "#CC6677"),
+                   celltype = c(`Cd8 Tcm` = "red",`Cd4 Tcm` = "blue"))
+p_t_exhaustion_tcm <- pheatmap((t_exhaustion_tcm[,c(1:40)] %>% select(rownames(exhaustion_anno))%>% t()),annotation_col = (immune.combined.t@meta.data %>% dplyr::select(celltype,Group)),cluster_rows = F,cluster_cols = F,show_rownames = T,show_colnames = F,scale = "row",breaks =unique(c(seq(-1,1,length=100))),annotation_row = exhaustion_anno,annotation_colors = anno_color,fontsize = 12)
+
+
+t_exhaustion_tem <- t_exhaustion %>% filter(str_detect(celltype,"Tem"))%>% arrange(factor(Group,levels = c("Untreated","9Gy TBI","TOFU-ACT")),factor(celltype,levels = c("Cd8 Tem/eff","Cd4 Tem/eff")))
+anno_color <- list(Group = c(Untreated ="#DDCC77",`9Gy TBI` = "#888888",`TOFU-ACT` = "#CC6677"),
+                   celltype = c(`Cd8 Tem/eff` = "red",`Cd4 Tem/eff` = "blue"))
+p_t_exhaustion_tem <- pheatmap(as.matrix(t_exhaustion_tem[,c(1:40)]%>% select(rownames(exhaustion_anno))%>% t()),annotation_col = (immune.combined.t@meta.data %>% dplyr::select(celltype,Group)),cluster_rows = F,cluster_cols = F,show_rownames = T,show_colnames = F,scale = "row",breaks =unique(c(seq(-1,1,length=100))),annotation_row = exhaustion_anno,annotation_colors = anno_color,fontsize = 12)
+
+
+t_exhaustion <- t_exhaustion %>% pivot_longer(-c("celltype","Group"),names_to = "Pathway",values_to = "AUC")
+t_exhaustion$Group <- factor(t_exhaustion$Group,levels = c("Untreated","9Gy TBI","TOFU-ACT"))
+
+t_p4 <- box_all(t_exhaustion,Pathway,AUC)
+t_wilcox <- wilcox(t_exhaustion,Pathway,AUC~Group)
+temp <- t_exhaustion %>% filter(Pathway %in% (t_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Pathway) %>% unique()))
+t_p5 <- box_b(temp,"Pathway","AUC",t_wilcox)
+
+
+## Cd8 Tem/eff
+t_p9 <- box_all(t_exhaustion %>% filter(celltype =="Cd8 Tem/eff"),Pathway,AUC)
+t_wilcox <- wilcox(t_exhaustion %>% filter(celltype =="Cd8 Tem/eff"),Pathway,AUC~Group)
+temp <- t_exhaustion %>% filter(Pathway %in% (t_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Pathway) %>% unique()))
+t_p10 <- box_b(temp%>% filter(celltype =="Cd8 Tem/eff"),"Pathway","AUC",t_wilcox) +scale_y_log10()
+
+
+## Cd8 Tcm
+t_p11 <- box_all(t_exhaustion %>% filter(celltype =="Cd8 Tcm"),Pathway,AUC)
+t_wilcox <- wilcox(t_exhaustion %>% filter(celltype =="Cd8 Tcm"),Pathway,AUC~Group)
+temp <- t_exhaustion %>% filter(Pathway %in% (t_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Pathway) %>% unique()))
+t_p12 <- box_b(temp%>% filter(celltype =="Cd8 Tcm"),"Pathway","AUC",t_wilcox)
+
+
+## Cd4 Tem/eff
+
+t_p13 <- box_all(t_exhaustion %>% filter(celltype =="Cd4 Tem/eff"),Pathway,AUC)
+t_wilcox <- wilcox(t_exhaustion %>% filter(celltype =="Cd4 Tem/eff"),Pathway,AUC~Group)
+temp <- t_exhaustion %>% filter(Pathway %in% (t_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Pathway) %>% unique()))
+t_p14 <- box_b(temp%>% filter(celltype =="Cd4 Tem/eff"),"Pathway","AUC",t_wilcox)
+
+
+## CD4 Tcm
+t_p15 <- box_all(t_exhaustion %>% filter(celltype =="Cd4 Tcm"),Pathway,AUC)
+t_wilcox <- wilcox(t_exhaustion %>% filter(celltype =="Cd4 Tcm"),Pathway,AUC~Group)
+temp <- t_exhaustion %>% filter(Pathway %in% (t_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Pathway) %>% unique()))
+t_p16 <- box_b(temp%>% filter(celltype =="Cd4 Tem/eff"),"Pathway","AUC",t_wilcox)
+
+## Treg
+t_p17 <- box_all(t_exhaustion %>% filter(celltype =="Treg"),Pathway,AUC)
+t_wilcox <- wilcox(t_exhaustion %>% filter(celltype =="Treg"),Pathway,AUC~Group)
+temp <- t_exhaustion %>% filter(Pathway %in% (t_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Pathway) %>% unique()))
+t_p18 <- box_b(temp%>% filter(celltype =="Treg"),"Pathway","AUC",t_wilcox)
+
+# t_p4  <- ggplot(t_exhaustion,aes(x=Pathway,y=AUC,fill=Group))+geom_boxplot(outlier.shape = NA)+theme(axis.text.x = element_text(angle = 45,hjust = 1,color = "black")) +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_compare_means(aes(group=Group),method = "kruskal.test",label="p.signif")+ylim(0,0.5)
+# 
+# t_wilcox <- t_exhaustion %>% group_by(Pathway)%>%wilcox_test(AUC ~ Group,ref.group = "Untreated")%>%adjust_pvalue(method="bonferroni") %>% add_y_position()
+# 
+# t_p5 <- ggboxplot(t_exhaustion,x="Group",y="AUC",fill="Group",facet.by = "Pathway",scales = "free_y") +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_pvalue_manual(t_wilcox,tip.length = 0.01,hide.ns = T) +theme(strip.text.x=element_text(size=15, color="red", face="bold.italic"),
+#         axis.text.x = element_text(angle = 45, hjust = 1,color = "black"),
+#         axis.title.x = element_blank(),legend.text=element_text(size=15),title = element_text(size = 15))
+
+
+
+
+# t_immunology_cells_AUC <- AUCell_calcAUC(immunology_gsva,t_rankings,nCores = 7)
+# t_immunology<- getAUC(t_immunology_cells_AUC) %>% t() %>% cbind(immune.combined.t@meta.data %>% select(Group,celltype))
+# write.table(t_immunology,"t_cells_immunology.txt",col.names = NA,row.names = T,quote = F,sep = "\t")
+t_immunology <- fread("t_cells_immunology.txt") %>% column_to_rownames(var="V1")
+t_immunology <- t_immunology %>% pivot_longer(-c("celltype","Group"),names_to = "Pathway",values_to = "AUC")
+t_immunology$Group <- factor(t_immunology$Group,levels = c("Untreated","9Gy TBI","TOFU-ACT"))
+
+
+
+t_p6 <- box_all(t_immunology,Pathway,AUC)
+t_wilcox <- wilcox(t_immunology,Pathway,AUC~Group)
+temp <- t_immunology %>% filter(Pathway %in% (t_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Pathway) %>% unique()))
+t_p7 <- box_b(temp,"Pathway","AUC",t_wilcox)
+
+## Cd8 Tem/eff
+t_p9 <- box_all(t_immunology %>% filter(celltype =="Cd8 Tem/eff"),Pathway,AUC)
+t_wilcox <- wilcox(t_immunology %>% filter(celltype =="Cd8 Tem/eff"),Pathway,AUC~Group)
+temp <- t_immunology %>% filter(Pathway %in% (t_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Pathway) %>% unique()))
+t_p10 <- box_b(temp%>% filter(celltype =="Cd8 Tem/eff"),"Pathway","AUC",t_wilcox) +scale_y_log10()
+
+
+## Cd8 Tcm
+t_p11 <- box_all(t_immunology %>% filter(celltype =="Cd8 Tcm"),Pathway,AUC)
+t_wilcox <- wilcox(t_immunology %>% filter(celltype =="Cd8 Tcm"),Pathway,AUC~Group)
+temp <- t_immunology %>% filter(Pathway %in% (t_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Pathway) %>% unique()))
+t_p12 <- box_b(temp%>% filter(celltype =="Cd8 Tcm"),"Pathway","AUC",t_wilcox)
+
+
+## Cd4 Tem/eff
+
+t_p13 <- box_all(t_immunology %>% filter(celltype =="Cd4 Tem/eff"),Pathway,AUC)
+t_wilcox <- wilcox(t_immunology %>% filter(celltype =="Cd4 Tem/eff"),Pathway,AUC~Group)
+temp <- t_immunology %>% filter(Pathway %in% (t_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Pathway) %>% unique()))
+t_p14 <- box_b(temp%>% filter(celltype =="Cd4 Tem/eff"),"Pathway","AUC",t_wilcox)
+
+
+## CD4 Tcm
+t_p15 <- box_all(t_immunology %>% filter(celltype =="Cd4 Tcm"),Pathway,AUC)
+t_wilcox <- wilcox(t_immunology %>% filter(celltype =="Cd4 Tcm"),Pathway,AUC~Group)
+temp <- t_immunology %>% filter(Pathway %in% (t_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Pathway) %>% unique()))
+t_p16 <- box_b(temp%>% filter(celltype =="Cd4 Tem/eff"),"Pathway","AUC",t_wilcox)
+
+## Treg
+t_p17 <- box_all(t_immunology %>% filter(celltype =="Treg"),Pathway,AUC)
+t_wilcox <- wilcox(t_immunology %>% filter(celltype =="Treg"),Pathway,AUC~Group)
+temp <- t_immunology %>% filter(Pathway %in% (t_wilcox %>% filter(p.adj.signif != "ns") %>% pull(Pathway) %>% unique()))
+t_p18 <- box_b(temp%>% filter(celltype =="Treg"),"Pathway","AUC",t_wilcox)
+
+t_immunology <- fread("t_cells_immunology.txt") %>% column_to_rownames(var="V1")
+t_immunology_mat <- t_immunology %>% filter(str_detect(celltype,"Cd")) %>% arrange(factor(Group,levels = c("Untreated","9Gy TBI","TOFU-ACT")),factor(celltype,levels = c("Cd8 Tem/eff","Cd8 Tcm","Cd4 Tem/eff","Cd4 Tcm"))) 
+anno_color <- list(Group = c(Untreated ="#DDCC77",`9Gy TBI` = "#888888",`TOFU-ACT` = "#CC6677"),
+                   celltype = c(`Cd8 Tem/eff` = "orange",`Cd8 Tcm` = "red",`Cd4 Tem/eff` = "blue",`Cd4 Tcm` = "green"))
+
+p_t_immunology <- pheatmap((t_immunology_mat[,c(1:31)] %>% t()),annotation_col = (immune.combined.t@meta.data %>% dplyr::select(celltype,Group)),cluster_rows = F,cluster_cols = F,show_rownames = T,show_colnames = F,scale = "row",breaks =unique(c(seq(-1,1,length=100))),annotation_colors = anno_color,fontsize = 12)
+
+
+
+
+
+
+
+
+
+
+
+
+
+# t_p6  <- ggplot(t_immunology,aes(x=Pathway,y=AUC,fill=Group))+geom_boxplot(outlier.shape = NA)+theme(axis.text.x = element_text(angle = 70,hjust = 1,color = "black")) +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_compare_means(aes(group=Group),method = "kruskal.test",label="p.signif")+ylim(0,0.5)
+# 
+# t_wilcox <- t_immunology %>% group_by(Pathway)%>%wilcox_test(AUC ~ Group,ref.group = "Untreated")%>%adjust_pvalue(method="bonferroni") %>% add_y_position()
+# 
+# t_p7 <- ggboxplot(t_immunology,x="Group",y="AUC",fill="Group",facet.by = "Pathway",scales = "free_y") +xlab("")+scale_color_manual(values = group_color)+scale_fill_manual(values = group_color)+stat_pvalue_manual(t_wilcox,tip.length = 0.01,hide.ns = T) +theme(strip.text.x=element_text(size=15, color="red", face="bold.italic"),
+#         axis.text.x = element_text(angle = 45, hjust = 1,color = "black"),
+#         axis.title.x = element_blank(),legend.text=element_text(size=15),title = element_text(size = 15))
+
+## Neotcr
+t_neotcr_cells_AUC <- AUCell_calcAUC(neotcr_gsva,t_rankings,nCores = 7)
+t_neotcr<- getAUC(t_neotcr_cells_AUC) %>% t() %>% data.frame()
+# write.table(t_neotcr,"t_cells_neotcr.txt",col.names = NA,row.names = T,quote = F,sep = "\t")
+
+immune.combined.t <- AddMetaData(immune.combined.t,t_neotcr)
+immune.combined.t@active.assay <- "RNA"
+immune.combined.t <- AddModuleScore(immune.combined.t,features=list("Entpd1","Cxcl13","Pdcd1","Itgae","Tigit","Tox","Lag3","Havcr2","Gzmk"),name = "NeoTCR_Dysfunctional")
+t_p8 <- FeaturePlot(immune.combined.t,features = "NeoTCR_Dysfunctional1",cols = c("grey","red"),split.by = "group")
+
+
+
+
+
+
+
+
+## TCR
+tcr <- rbind(fread("pool1_clones.clns.txt"),fread("pool2_clones.clns.txt"),fread("pool3_clones.clns.txt")) %>% filter(str_detect(allVHitsWithScore,"TR"))
+tcr <- tcr %>% mutate(V=sapply(strsplit(tcr$allVHitsWithScore,'*',fixed = T),"[",1),D=(tcr$allDHitsWithScore %>% substr(1,5)),J=sapply(strsplit(tcr$allJHitsWithScore,'*',fixed = T),"[",1))
+dup_tcr <- tcr$tagValueCELL[tcr$tagValueCELL %>% duplicated()]
+dup_tcr <- tcr[tcr$tagValueCELL %in% dup_tcr,]
+vdj <- tcr %>% dplyr::select(V,D,J,tagValueCELL,aaSeqCDR3)
+immune.combined.t$tagValueCELL <- immune.combined.t@meta.data %>% rownames() %>% substr(7,22) 
+immune.combined.t@meta.data <- immune.combined.t@meta.data %>% left_join(vdj)
+write.table(immune.combined.t@meta.data,"t_cells_tcr.txt",col.names = T,row.names = F,quote = F,sep = "\t")
+
+
+```
+
+
+
+## Triple postive
+```{r}
+## Ifng Cd69 Pd1 Ctla4 expression
+immune.combined.t <- subset(immune.combined.t,cells = rownames(immune.combined.t@meta.data %>% filter(Group != "ttRNA-ACT") ))
+immune.combined.t@active.assay <- "alra"
+mat <- GetAssayData(immune.combined.t,assay = "alra",slot = "data") %>% as.data.frame()
+mat <- mat[c("Pdcd1","Ctla4","Vsir","Lag3","Havcr2"),] %>% t() %>% as.data.frame()
+
+# four groups: 
+# mat$ic <- ifelse(mat$Pdcd1 >0 & mat$Havcr2 >0 & mat$Lag3 >0,"Triple Positive",ifelse(mat$Pdcd1 == 0 & mat$Havcr2 == 0 & mat$Lag3 == 0,"Triple Negative",ifelse(mat$Pdcd1 > 0,"Pd1 Positive","Pd1 Negative")))
+
+# two groups, 3 or 3+ is Exhausted. 2 or 2- is 
+mat<-  mat%>% mutate(ic=apply(mat == 0,1,sum),ic=ifelse(ic < 3,"More Exhausted","Less Exhausted"))
+
+immune.combined.t$ic <- immune.combined.t$ic.freq <- NULL
+
+ic <- mat$ic
+names(ic) <- rownames(mat)
+immune.combined.t <- AddMetaData(immune.combined.t,ic,col.name = "ic")
+
+
+
+#immune.combined.t$ic <- ifelse(immune.combined.t$Pdcd1 >0 & immune.combined.t$Havcr2 >0 & immune.combined.t$Lag3 >0,"Triple Positive",ifelse(immune.combined.t$Pdcd1 == 0 & immune.combined.t$Havcr2 == 0 & immune.combined.t$Lag3 == 0,"Triple Negative","mat Positive"))
+
+immune.combined.t@active.ident <- as.factor(immune.combined.t$ic)
+
+
+control_freq <- immune.combined.t@meta.data %>% filter(Group=="Untreated") %>% freq_table(ic) %>% mutate(ic.freq=paste0(ic," (",prop,"%)"))
+control_freq <- immune.combined.t@meta.data %>% filter(Group=="Untreated") %>% left_join(control_freq,by="ic") %>% dplyr::select(ic,ic.freq)
+rownames(control_freq) <- rownames(immune.combined.t@meta.data %>% filter(Group=="Untreated"))
+hsc_freq <- immune.combined.t@meta.data %>% filter(Group=="9Gy TBI") %>% freq_table(ic) %>%
+  mutate(ic.freq=paste0(ic," (",prop,"%)"))
+hsc_freq <- immune.combined.t@meta.data %>% filter(Group=="9Gy TBI") %>% left_join(hsc_freq,by="ic") %>% dplyr::select(ic,ic.freq)
+rownames(hsc_freq) <- rownames(immune.combined.t@meta.data %>% filter(Group=="9Gy TBI"))
+
+tofu_freq <- immune.combined.t@meta.data %>% filter(Group=="TOFU-ACT") %>% freq_table(ic) %>%
+  mutate(ic.freq=paste0(ic," (",prop,"%)"))
+tofu_freq <- immune.combined.t@meta.data %>% filter(Group=="TOFU-ACT") %>% left_join(tofu_freq,by="ic") %>% dplyr::select(ic,ic.freq)
+rownames(tofu_freq) <- rownames(immune.combined.t@meta.data %>% filter(Group=="TOFU-ACT"))
+immune_freq <- rbind(control_freq,hsc_freq,tofu_freq)
+immune_freq <- immune_freq %>% pull(ic.freq)
+names(immune_freq) <- rownames(immune.combined.t@meta.data)
+immune.combined.t <- AddMetaData(immune.combined.t,immune_freq,col.name = "ic.freq")
+immune.combined.t@active.ident <- as.factor(immune_freq)
+
+#immune_color <- c("red","blue","green","grey")
+immune_color<- c("red","grey")
+#names(immune_color) <- c("Triple Positive","Pd1 Positive","Pd1 Negative","Triple Negative")
+names(immune_color) <- c("More Exhausted","Less Exhausted")
+immune_col_table <- immune.combined.t@meta.data %>% left_join(data.frame(ic=names(immune_color),immune_color=immune_color)) %>% dplyr::select(ic.freq,immune_color) %>% unique()
+
+#immune_col_table$ic.freq <- factor(immune_col_table$ic.freq,levels = c("Triple Positive (26.3%)","Pd1 Positive (23.4%)","Pd1 Negative (12.4%)","Triple Negative (37.9%)","Triple Positive (5.9%)","Pd1 Positive (9.1%)","Pd1 Negative (34.4%)","Triple Negative (50.5%)","Triple Positive (21.7%)","Pd1 Positive (36.8%)","Pd1 Negative (14.6%)","Triple Negative (26.9%)"))
+
+#immune_col_table <- immune_col_table %>% arrange(factor(ic.freq,levels =  c("Triple Positive (26.3%)","Pd1 Positive (23.4%)","Pd1 Negative (12.4%)","Triple Negative (37.9%)","Triple Positive (5.9%)","Pd1 Positive (9.1%)","Pd1 Negative (34.4%)","Triple Negative (50.5%)","Triple Positive (21.7%)","Pd1 Positive (36.8%)","Pd1 Negative (14.6%)","Triple Negative (26.9%)")))
+
+immune_col_table <- immune_col_table %>% arrange(factor(ic.freq,levels =  c("More Exhausted (62.9%)","Less Exhausted (37.1%)","More Exhausted (36%)","Less Exhausted (64%)","More Exhausted (56.4%)","Less Exhausted (43.6%)")))
+
+immune_col_table <- immune_col_table %>% arrange(factor(ic.freq,levels =  c("More Exhausted (62.9%)","Less Exhausted (37.1%)","More Exhausted (36%)","Less Exhausted (64%)","More Exhausted (56.4%)","Less Exhausted (43.6%)")))
+
+immune_color <- immune_col_table$immune_color
+names(immune_color) <- immune_col_table$ic.freq
+
+
+
+Idents(immune.combined.t) <- immune.combined.t$ic.freq
+t_p8 <- DimPlot(immune.combined.t,reduction = "umap", repel = TRUE,label = F,split.by = "Group",cols = immune_color,label.size = 7) & theme(title = element_text(size = 20),strip.text.x=element_text(size=20),legend.text = element_text(size =20))
+
+pdf("t_5ic_umap.pdf",width = 16,height = 6)
+t_p8
+dev.off()
+
+immune.combined.t@active.ident <- as.factor(immune.combined.t$celltype)
+
+
+
+
+### triangle point up = triple pos, square = Pd1 pos, circle = triple neg
+mat <- immune.combined.t@meta.data %>% left_join(immune_col_table)
+immune_color <- mat$immune_color
+names(immune_color) <- rownames(immune.combined.t@meta.data)
+immune.combined.t <- AddMetaData(immune.combined.t,immune_color,col.name = "immune_color")
+
+# t_p5 <- DimPlot(immune.combined.t, reduction = "umap", repel = TRUE,split.by = "Group",label = TRUE,label.size = 7,cols = immune_color) & theme(legend.position = "none",title = element_text(size = 20),strip.text.x=element_text(size=20))
+
+
+immune.combined.t@active.assay <- "alra"
+
+## exhaustion genes
+mat <- GetAssayData(immune.combined.t,assay = "alra",slot = "data") %>% as.data.frame()
+mat <- mat[c("Pdcd1","Ctla4","Tigit","Lag3","Havcr2"),] %>% t() %>% as.data.frame() %>% rownames_to_column(var="barcode") %>% left_join(immune.combined.t@meta.data %>% rownames_to_column(var="barcode") %>% dplyr::select(barcode,celltype,Group)) %>% na.omit() %>% dplyr::select(Group,celltype,everything(),-barcode) %>% arrange((celltype)) %>%mutate(across(where(is.numeric), ~ifelse(.x >0, 1, 0)))
+
+mat$positivity <- apply(mat[,-c(1:2)],1,sum)
+exhaustion_count <- mat %>% select(Group,celltype,positivity)%>%group_by(Group,celltype) %>% table() %>% as.data.frame() 
+cell_count <- immune.combined.t@meta.data %>% select(Group,celltype)%>% group_by(Group) %>% table() %>% as.data.frame()
+names(cell_count) <- c("Group","celltype","cell_count_per_celltype_per_group")
+exhaustion_count <- exhaustion_count %>% left_join(cell_count,by=c("Group","celltype")) %>% mutate(percentage_of=paste0(round(Freq/cell_count_per_celltype_per_group,3)*100,"%"))
+write.table(mat,file = "5_exhaustion_genes_count_per_celltype_per_group.csv",sep = ",",quote = F,row.names = F)
+write.table(exhaustion_count ,file = "5_exhaustion_genes_percentage_per_celltype_per_group.csv",sep = ",",quote = F,row.names = F)
+## cytokines 
+mat <- GetAssayData(immune.combined.t,assay = "alra",slot = "data") %>% as.data.frame()
+mat <- mat[c("Il2","Tnf","Ifng"),] %>% t() %>% as.data.frame() %>% rownames_to_column(var="barcode") %>% left_join(immune.combined.t@meta.data %>% rownames_to_column(var="barcode") %>% dplyr::select(barcode,celltype,Group)) %>% na.omit() %>% dplyr::select(Group,celltype,everything(),-barcode) %>% arrange((celltype)) %>%mutate(across(where(is.numeric), ~ifelse(.x >0, 1, 0)))
+
+mat$positivity <- apply(mat[,-c(1:2)],1,sum)
+exhaustion_count <- mat %>% select(Group,celltype,positivity)%>%group_by(Group,celltype) %>% table() %>% as.data.frame() 
+cell_count <- immune.combined.t@meta.data %>% select(Group,celltype)%>% group_by(Group) %>% table() %>% as.data.frame()
+names(cell_count) <- c("Group","celltype","cell_count_per_celltype_per_group")
+exhaustion_count <- exhaustion_count %>% left_join(cell_count,by=c("Group","celltype")) %>% mutate(percentage_of=paste0(round(Freq/cell_count_per_celltype_per_group,3)*100,"%"))
+write.table(mat,file = "3_cytokines_genes_count_per_celltype_per_group.csv",sep = ",",quote = F,row.names = F)
+write.table(exhaustion_count ,file = "3_cytokines_genes_percentage_per_celltype_per_group.csv",sep = ",",quote = F,row.names = F)
+## activation
+mat <- GetAssayData(immune.combined.t,assay = "alra",slot = "data") %>% as.data.frame()
+mat <- mat[c("Prf1","Nkg7","Gzma","Gzmb","Gzmk"),] %>% t() %>% as.data.frame() %>% rownames_to_column(var="barcode") %>% left_join(immune.combined.t@meta.data %>% rownames_to_column(var="barcode") %>% dplyr::select(barcode,celltype,Group)) %>% na.omit() %>% dplyr::select(Group,celltype,everything(),-barcode) %>% arrange((celltype)) %>%mutate(across(where(is.numeric), ~ifelse(.x >0, 1, 0)))
+
+mat$positivity <- apply(mat[,-c(1:2)],1,sum)
+exhaustion_count <- mat %>% select(Group,celltype,positivity)%>%group_by(Group,celltype) %>% table() %>% as.data.frame() 
+cell_count <- immune.combined.t@meta.data %>% select(Group,celltype)%>% group_by(Group) %>% table() %>% as.data.frame()
+names(cell_count) <- c("Group","celltype","cell_count_per_celltype_per_group")
+exhaustion_count <- exhaustion_count %>% left_join(cell_count,by=c("Group","celltype")) %>% mutate(percentage_of=paste0(round(Freq/cell_count_per_celltype_per_group,3)*100,"%"))
+write.table(mat,file = "5_cytotoxicity_genes_count_per_celltype_per_group.csv",sep = ",",quote = F,row.names = F)
+write.table(exhaustion_count ,file = "5_cytotoxicity_genes_percentage_per_celltype_per_group.csv",sep = ",",quote = F,row.names = F)
+
+
+## activation + inhibition heatmap
+immune.combined.t@active.assay <- "alra"
+mat <- GetAssayData(immune.combined.t,assay = "alra",slot = "data") %>% as.data.frame()
+mat <- mat[c("Prf1","Nkg7","Gzma","Gzmb","Gzmk","Pdcd1","Ctla4","Tigit","Lag3","Havcr2"),] %>% t() %>% as.data.frame()%>% rownames_to_column(var="barcode") %>% left_join(immune.combined.t@meta.data %>% rownames_to_column(var="barcode") %>% dplyr::select(barcode,celltype,Group)) %>% na.omit() %>% dplyr::select(barcode,Group,celltype,everything()) %>% arrange(factor(Group,levels = c("Untreated","9Gy TBI","TOFU-ACT")),factor(celltype,levels = c("Cd8 Tem/eff","Cd8 Tcm","Cd4 Tem/eff","Cd4 Tcm","Treg","NKT","NK"))) %>% column_to_rownames(var="barcode")
+write.table(mat,file="scrna_t_cell_exh_cyto_genes.csv",col.names = NA,row.names = T,quote = F,sep = ",")
+anno_color <- list(Group = c(Untreated ="#DDCC77",`9Gy TBI` = "#888888",`TOFU-ACT` = "#CC6677"))
+act_ic_anno <- data.frame(gene=c("Prf1","Nkg7","Gzma","Gzmb","Gzmk","Pdcd1","Ctla4","Tigit","Lag3","Havcr2"),Function=c(rep("Cytotoxic Marker",5),rep("Exhaustion Marker",5))) %>% column_to_rownames(var="gene")
+p_t_act_ic <- pheatmap((mat[,c(3:12)] %>% t()),annotation_col = (immune.combined.t@meta.data %>% dplyr::select(celltype,Group)),cluster_rows = F,cluster_cols = F,show_rownames = T,show_colnames = F,scale = "row",breaks =unique(c(seq(-1,1,length=100))),annotation_row = act_ic_anno,annotation_colors = anno_color,fontsize = 12)
+
+
+mat <- mat %>% pivot_longer(-c("celltype","Group"),names_to = "Gene",values_to = "TPM")
+mat$Group <- factor(mat$Group,levels = c("Untreated","9Gy TBI","TOFU-ACT"))
+mat$Gene <- factor(mat$Gene,levels = c("Prf1","Nkg7","Gzma","Gzmb","Gzmk","Pdcd1","Ctla4","Tigit","Lag3","Havcr2") )
+
+
+t_p19 <- box_all(mat %>% filter(Gene %in% c("Prf1","Nkg7","Gzma","Gzmb","Gzmk")),Gene,TPM)+scale_y_log10()
+t_p20 <- box_all(mat%>% filter(Gene %in% c("Pdcd1","Ctla4","Tigit","Lag3","Havcr2")),Gene,TPM)+scale_y_log10()
+t_wilcox <- wilcox(mat,Gene,TPM~Group)
+
+t_p21 <- box_b(mat %>% filter(Gene %in% c("Prf1","Nkg7","Gzma","Gzmb","Gzmk")),"Gene","TPM",t_wilcox%>% filter(Gene %in% c("Prf1","Nkg7","Gzma","Gzmb","Gzmk")))+scale_y_log10()
+t_p22 <- box_b(mat %>% filter(Gene %in% c("Pdcd1","Ctla4","Tigit","Lag3","Havcr2")),"Gene","TPM",t_wilcox%>% filter(Gene %in% c("Pdcd1","Ctla4","Tigit","Lag3","Havcr2")))+scale_y_log10()
+
+
+
+```
+
+## LR Interaction
+```{r}
+conflict_prefer("select","dplyr")
+conflict_prefer("filter","dplyr")
+conflict_prefer("setdiff","base")
+tumor_immune_obj <- merge(pool4_obj,immune.combined)
+
+all_celltype <- tumor_immune_obj@meta.data %>% select(Group,Sample,celltype) %>% rownames_to_column(var = "barcode") %>% left_join(immune.combined.t@meta.data %>% select(celltype) %>% rownames_to_column(var = "barcode"),by="barcode") 
+all_celltype <- all_celltype%>% filter(celltype.x == "T cells") %>% mutate(celltype=celltype.y) %>% rbind(all_celltype%>% filter(celltype.x != "T cells") %>% mutate(celltype=celltype.x)) %>% select(-celltype.x,-celltype.y) %>% filter(celltype != "NA")
+
+
+
+
+#all_celltype$celltype <- str_replace_all(all_celltype$celltype,c("Cd8 Tcm"="CD8 T cells"))
+#all_celltype$celltype <- str_replace_all(all_celltype$celltype,c("Cd4 Tcm"="CD4 T cells"))
+#all_celltype$celltype <- str_replace_all(all_celltype$celltype,c("Cd8 Tem/eff"="CD8 T cells"))
+#all_celltype$celltype <- str_replace_all(all_celltype$celltype,c("Cd4 Tem/eff"="CD4 T cells"))
+
+all_celltype <- all_celltype %>% filter(celltype %in% c("Cd8 Tcm","Cd4 Tcm","Cd8 Tem/eff","Cd4 Tem/eff","Treg","Tumor","M1 Macrophages","M2 Macrophages","DC"))
+all_celltype$celltype <- all_celltype$celltype %>% str_replace_all(c("Cd" = "CD","Macrophages" = "MF"))
+```
+
+```{r three groups run}
+# Untreated
+data.input <- GetAssayData(tumor_immune_obj, assay = "RNA", slot = "data") %>% CellChat::normalizeData() #normalized data matrix
+cell.use <- all_celltype %>% filter(Group == "Untreated") %>% pull(barcode)
+#cell.use = rownames(tumor_immune_obj@meta.data)[tumor_immune_obj@meta.data$Group == "Untreated"]
+data.input = data.input[, cell.use]
+labels <- all_celltype$celltype
+names(labels) <- all_celltype$barcode
+labels <- labels[cell.use]
+Group <- all_celltype %>% filter(Group == "Untreated") %>% pull(Group)
+#Group <- (tumor_immune_obj@meta.data$Group)[tumor_immune_obj@meta.data$Group == "Untreated"]
+meta <- tibble(labels = (labels), row.names = names(labels),Group=Group) # create a dataframe of the cell labels
+# meta$labels <- droplevels(meta$labels,exclude = setdiff(levels(meta$labels),unique(meta$labels)))
+
+cellchat.untreated <- createCellChat(object = data.input, meta = meta, group.by = "labels")
+cellchat.untreated  <- addMeta(cellchat.untreated , meta = meta, meta.name = "labels")
+cellchat.untreated  <- setIdent(cellchat.untreated , ident.use = "labels") # set "labels" as default cell identity
+levels(cellchat.untreated@idents) # show factor levels of the cell labels
+unique(cellchat.untreated@idents)
+
+
+CellChatDB <- CellChatDB.mouse
+showDatabaseCategory(CellChatDB)
+cellchat.untreated@DB <- CellChatDB
+
+
+## preprocessing
+cellchat.untreated <- subsetData(cellchat.untreated)
+future::plan("multiprocess", workers = 6) # do parallel
+cellchat.untreated <- identifyOverExpressedGenes(cellchat.untreated)
+cellchat.untreated <- identifyOverExpressedInteractions(cellchat.untreated)
+cellchat.untreated <- projectData(cellchat.untreated, PPI.mouse)
+cellchat.untreated <- computeCommunProb(cellchat.untreated)
+# Filter out the cell-cell communication if there are only few number of cells in certain cell groups
+cellchat.untreated <- filterCommunication(cellchat.untreated, min.cells = 10)
+cellchat.untreated <- computeCommunProbPathway(cellchat.untreated)
+cellchat.untreated  <- aggregateNet(cellchat.untreated)
+groupSize.untreated <- as.numeric(table(cellchat.untreated@idents))
+cellchat.untreated <- netAnalysis_computeCentrality(cellchat.untreated, slot.name = "netP")
+# par(mfrow = c(1,2), xpd=TRUE)
+# netVisual_circle(cellchat.untreated@net$count, vertex.weight = groupSize.untreated, weight.scale = T, label.edge= F, title.name = "Untreated Number of interactions")
+# netVisual_circle(cellchat.untreated@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+df.net.untreated <- subsetCommunication(cellchat.untreated)
+df.net.untreated <- df.net.untreated %>% mutate(id=paste0(source,"-",target,"-",interaction_name))
+write.table(df.net.untreated,file = "df.net.untreated_6celltypes.csv",quote = F,sep = ",")
+gc()
+# TOFU
+data.input <- GetAssayData(tumor_immune_obj, assay = "RNA", slot = "data") %>% CellChat::normalizeData() #normalized data matrix
+cell.use <- all_celltype %>% filter(Group == "TOFU-ACT") %>% pull(barcode)
+#cell.use = rownames(tumor_immune_obj@meta.data)[tumor_immune_obj@meta.data$Group == "TOFU-ACT"]
+data.input = data.input[, cell.use]
+labels <- all_celltype$celltype
+names(labels) <- all_celltype$barcode
+labels <- labels[cell.use]
+Group <- all_celltype %>% filter(Group == "TOFU-ACT") %>% pull(Group)
+#Group <- (tumor_immune_obj@meta.data$Group)[tumor_immune_obj@meta.data$Group == "TOFU-ACT"]
+meta <- tibble(labels = (labels), row.names = names(labels),Group=Group) # create a dataframe of the cell labels
+# meta$labels <- droplevels(meta$labels,exclude = setdiff(levels(meta$labels),unique(meta$labels)))
+
+cellchat.tofu <- createCellChat(object = data.input, meta = meta, group.by = "labels")
+cellchat.tofu  <- addMeta(cellchat.tofu , meta = meta, meta.name = "labels")
+cellchat.tofu  <- setIdent(cellchat.tofu , ident.use = "labels") # set "labels" as default cell identity
+levels(cellchat.tofu@idents) # show factor levels of the cell labels
+unique(cellchat.tofu@idents)
+
+
+CellChatDB <- CellChatDB.mouse
+showDatabaseCategory(CellChatDB)
+cellchat.tofu@DB <- CellChatDB
+
+
+## preprocessing
+cellchat.tofu <- subsetData(cellchat.tofu)
+future::plan("multiprocess", workers = 6) # do parallel
+cellchat.tofu <- identifyOverExpressedGenes(cellchat.tofu)
+cellchat.tofu <- identifyOverExpressedInteractions(cellchat.tofu)
+cellchat.tofu <- projectData(cellchat.tofu, PPI.mouse)
+cellchat.tofu <- computeCommunProb(cellchat.tofu)
+# Filter out the cell-cell communication if there are only few number of cells in certain cell groups
+cellchat.tofu <- filterCommunication(cellchat.tofu, min.cells = 10)
+cellchat.tofu <- computeCommunProbPathway(cellchat.tofu)
+cellchat.tofu  <- aggregateNet(cellchat.tofu)
+groupSize.tofu <- as.numeric(table(cellchat.tofu@idents))
+cellchat.tofu <- netAnalysis_computeCentrality(cellchat.tofu, slot.name = "netP")
+# par(mfrow = c(1,2), xpd=TRUE)
+# netVisual_circle(cellchat.tofu@net$count, vertex.weight = groupSize.tofu, weight.scale = T, label.edge= F, title.name = "TOFU-ACT Number of interactions")
+# netVisual_circle(cellchat.tofu@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+
+
+df.net.tofu<- subsetCommunication(cellchat.tofu)
+#write.table(df.net.tofu,file = "df.net.tofu.csv",quote = F,sep = ",",row.names = F)
+df.net.tofu <- df.net.tofu %>% mutate(id=paste0(source,"-",target,"-",interaction_name))
+write.table(df.net.tofu,file = "df.net.tofu_6celltypes.csv",quote = F,sep = ",")
+gc()
+#9Gy TBI
+data.input <- GetAssayData(tumor_immune_obj, assay = "RNA", slot = "data") %>% CellChat::normalizeData() #normalized data matrix
+cell.use <- all_celltype %>% filter(Group == "9Gy TBI") %>% pull(barcode)
+#cell.use = rownames(tumor_immune_obj@meta.data)[tumor_immune_obj@meta.data$Group == "9Gy TBI"]
+data.input = data.input[, cell.use]
+labels <- all_celltype$celltype
+names(labels) <- all_celltype$barcode
+labels <- labels[cell.use]
+Group <- all_celltype %>% filter(Group == "9Gy TBI") %>% pull(Group)
+#Group <- (tumor_immune_obj@meta.data$Group)[tumor_immune_obj@meta.data$Group == "9Gy TBI"]
+meta <- tibble(labels = (labels), row.names = names(labels),Group=Group) # create a dataframe of the cell labels
+# meta$labels <- droplevels(meta$labels,exclude = setdiff(levels(meta$labels),unique(meta$labels)))
+
+cellchat.9gy <- createCellChat(object = data.input, meta = meta, group.by = "labels")
+cellchat.9gy  <- addMeta(cellchat.9gy , meta = meta, meta.name = "labels")
+cellchat.9gy  <- setIdent(cellchat.9gy , ident.use = "labels") # set "labels" as default cell identity
+levels(cellchat.9gy@idents) # show factor levels of the cell labels
+unique(cellchat.9gy@idents)
+
+
+CellChatDB <- CellChatDB.mouse
+showDatabaseCategory(CellChatDB)
+cellchat.9gy@DB <- CellChatDB
+
+
+## preprocessing
+cellchat.9gy <- subsetData(cellchat.9gy)
+future::plan("multiprocess", workers = 6) # do parallel
+cellchat.9gy <- identifyOverExpressedGenes(cellchat.9gy)
+cellchat.9gy <- identifyOverExpressedInteractions(cellchat.9gy)
+cellchat.9gy <- projectData(cellchat.9gy, PPI.mouse)
+cellchat.9gy <- computeCommunProb(cellchat.9gy)
+# Filter out the cell-cell communication if there are only few number of cells in certain cell groups
+cellchat.9gy <- filterCommunication(cellchat.9gy, min.cells = 10)
+cellchat.9gy <- computeCommunProbPathway(cellchat.9gy)
+cellchat.9gy  <- aggregateNet(cellchat.9gy)
+groupSize.9gy <- as.numeric(table(cellchat.9gy@idents))
+# par(mfrow = c(1,2), xpd=TRUE)
+# netVisual_circle(cellchat.9gy@net$count, vertex.weight = groupSize.9gy, weight.scale = T, label.edge= F, title.name = "9Gy TBI Number of interactions")
+# netVisual_circle(cellchat.9gy@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+df.net.9gy<- subsetCommunication(cellchat.9gy)
+df.net.9gy <- df.net.9gy %>% mutate(id=paste0(source,"-",target,"-",interaction_name))
+write.table(df.net.9gy,file = "df.net.9gy_6celltypes.csv",quote = F,sep = ",",row.names = F)
+
+rm(tumor_immune_obj)
+
+par(mfrow = c(1,3), xpd=TRUE)
+netVisual_circle(cellchat.untreated@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Untreated Number of interactions")
+netVisual_circle(cellchat.tofu@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "TOFU-ACT Number of interactions")
+netVisual_circle(cellchat.9gy@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "9Gy TBI Number of interactions")
+
+# save(df.net.9gy,df.net.tofu,df.net.untreated,cellchat.9gy,cellchat.tofu,cellchat.tofu,file = "cellchat.RData")
+## Cd8
+#Tumor
+Cd8_untreated <- df.net.untreated %>% filter(source %in% c("M1 Macrophages","M2 Macrophages","DC","Tumor")) %>%  filter(str_detect(target,"Cd8")) %>% rbind(df.net.untreated %>% filter(target %in% c("M1 Macrophages","M2 Macrophages","DC","Tumor")) %>% filter(str_detect(source,"Cd8"))) %>% mutate(joint=paste0(source,"-",target,"-",interaction_name))
+
+Cd8_tofu<- df.net.tofu%>% filter(source %in% c("M1 Macrophages","M2 Macrophages","DC","Tumor")) %>% filter(str_detect(target,"Cd8"))%>% rbind(df.net.untreated %>% filter(target %in% c("M1 Macrophages","M2 Macrophages","DC","Tumor")) %>% filter(str_detect(source,"Cd8")))%>% mutate(joint=paste0(source,"-",target,"-",interaction_name))
+
+Cd8_9gy<- df.net.9gy%>% filter(source %in% c("M1 Macrophages","M2 Macrophages","DC","Tumor")) %>% filter(str_detect(target,"Cd8"))%>% rbind(df.net.untreated %>% filter(target %in% c("M1 Macrophages","M2 Macrophages","DC","Tumor")) %>% filter(str_detect(source,"Cd8")))%>% mutate(joint=paste0(source,"-",target,"-",interaction_name))
+
+Cd4_untreated <- df.net.untreated %>% filter(source %in% c("M1 Macrophages","M2 Macrophages","DC","Tumor")) %>%  filter(str_detect(target,"Cd4")) %>% rbind(df.net.untreated %>% filter(target %in% c("M1 Macrophages","M2 Macrophages","DC","Tumor")) %>% filter(str_detect(source,"Cd4")))%>% mutate(joint=paste0(source,"-",target,"-",interaction_name))
+
+Cd4_9gy<- df.net.9gy%>% filter(source %in% c("M1 Macrophages","M2 Macrophages","DC","Tumor")) %>% filter(str_detect(target,"Cd4"))%>% rbind(df.net.untreated %>% filter(target %in% c("M1 Macrophages","M2 Macrophages","DC","Tumor")) %>% filter(str_detect(source,"Cd4")))%>% mutate(joint=paste0(source,"-",target,"-",interaction_name))
+
+Cd4_tofu<- df.net.tofu%>% filter(source %in% c("M1 Macrophages","M2 Macrophages","DC","Tumor")) %>% filter(str_detect(target,"Cd4"))%>% rbind(df.net.untreated %>% filter(target %in% c("M1 Macrophages","M2 Macrophages","DC","Tumor")) %>% filter(str_detect(source,"Cd4")))%>% mutate(joint=paste0(source,"-",target,"-",interaction_name))
+
+# compare lr in groups
+Cd8_tofu_untreated_down <-Cd8_untreated  %>% filter(id %in% setdiff(Cd8_untreated$id,Cd8_tofu$id)) 
+Cd8_tofu_untreated_up <-Cd8_tofu %>% filter(id %in% setdiff(Cd8_tofu$id,Cd8_untreated$id)) 
+Cd4_tofu_untreated_down <-Cd4_untreated  %>% filter(id %in% setdiff(Cd4_untreated$id,Cd4_tofu$id)) 
+Cd4_tofu_untreated_up <-Cd4_tofu %>% filter(id %in% setdiff(Cd4_tofu$id,Cd4_untreated$id)) 
+
+Cd8_tofu_9gy_down <-Cd8_9gy  %>% filter(id %in% setdiff(Cd8_9gy$id,Cd8_tofu$id)) 
+Cd8_tofu_9gy_up <-Cd8_tofu %>% filter(id %in% setdiff(Cd8_tofu$id,Cd8_9gy$id)) 
+Cd4_tofu_9gy_down <-Cd4_9gy  %>% filter(id %in% setdiff(Cd4_9gy$id,Cd4_tofu$id)) 
+Cd4_tofu_9gy_up <-Cd4_tofu %>% filter(id %in% setdiff(Cd4_tofu$id,Cd4_9gy$id))
+
+Cd8_9gy_untreated_down <-Cd8_untreated  %>% filter(id %in% setdiff(Cd8_untreated$id,Cd8_9gy$id)) 
+Cd8_9gy_untreated_up <-Cd8_9gy %>% filter(id %in% setdiff(Cd8_9gy$id,Cd8_untreated$id)) 
+Cd4_9gy_untreated_down <-Cd4_untreated  %>% filter(id %in% setdiff(Cd4_untreated$id,Cd4_9gy$id)) 
+Cd4_9gy_untreated_up <-Cd4_9gy %>% filter(id %in% setdiff(Cd4_9gy$id,Cd4_untreated$id))
+
+
+write.table(Cd8_tofu_untreated_up,file = "Cd8_tofu_untreated_up_6celltypes.csv",quote = F,sep = ",",row.names = F)
+write.table(Cd8_tofu_untreated_down,file = "Cd8_tofu_untreated_down_6celltypes.csv",quote = F,sep = ",",row.names = F)
+
+write.table(Cd8_9gy_untreated_up,file = "Cd8_9gy_untreated_up_6celltypes.csv",quote = F,sep = ",",row.names = F)
+write.table(Cd8_9gy_untreated_down,file = "Cd8_9gy_untreated_down_6celltypes.csv",quote = F,sep = ",",row.names = F)
+
+write.table(Cd8_tofu_9gy_up,file = "Cd8_tofu_9gy_up_6celltypes.csv",quote = F,sep = ",",row.names = F)
+write.table(Cd8_tofu_9gy_down,file = "Cd8_tofu_9gy_down_6celltypes.csv",quote = F,sep = ",",row.names = F)
+
+write.table(Cd4_tofu_untreated_up,file = "Cd4_tofu_untreated_up_6celltypes.csv",quote = F,sep = ",",row.names = F)
+write.table(Cd4_tofu_untreated_down,file = "Cd4_tofu_untreated_down_6celltypes.csv",quote = F,sep = ",",row.names = F)
+
+write.table(Cd4_9gy_untreated_up,file = "Cd4_9gy_untreated_up_6celltypes.csv",quote = F,sep = ",",row.names = F)
+write.table(Cd4_9gy_untreated_down,file = "Cd4_9gy_untreated_down_6celltypes.csv",quote = F,sep = ",",row.names = F)
+
+write.table(Cd4_tofu_9gy_up,file = "Cd4_tofu_9gy_up_6celltypes.csv",quote = F,sep = ",",row.names = F)
+write.table(Cd4_tofu_9gy_down,file = "Cd4_tofu_9gy_down_6celltypes.csv",quote = F,sep = ",",row.names = F)
+
+pathways.show <- c("MHC-I")
+par(mfrow=c(3,1))
+netVisual_aggregate(cellchat.untreated, signaling = pathways.show, layout = "circle")
+netVisual_aggregate(cellchat.9gy, signaling = pathways.show, layout = "circle")
+netVisual_aggregate(cellchat.tofu, signaling = pathways.show, layout = "circle")
+
+
+pathways.show <- c("MHC-II")
+par(mfrow=c(3,1))
+netVisual_aggregate(cellchat.untreated, signaling = pathways.show, layout = "circle")
+netVisual_aggregate(cellchat.9gy, signaling = pathways.show, layout = "circle")
+netVisual_aggregate(cellchat.tofu, signaling = pathways.show, layout = "circle")
+
+
+Cd8_untreated[Cd8_untreated$id %in% setdiff(Cd8_untreated$id,c(Cd8_9gy$id,Cd8_tofu$id)),]
+Cd8_9gy[Cd8_9gy$id %in% setdiff(Cd8_9gy$id,c(Cd8_untreated$id,Cd8_tofu$id)),]
+Cd8_tofu[Cd8_tofu$id %in% setdiff(Cd8_tofu$id,c(Cd8_untreated$id,Cd8_9gy$id)),]
+```
+## Integration
+```{r}
+conflict_prefer("select","dplyr")
+conflict_prefer("filter","dplyr")
+conflict_prefer("setdiff","base")
+
+object.list <- list(TOFU=cellchat.tofu,Untreated=cellchat.untreated)
+cellchat <- mergeCellChat(object.list, add.names = names(object.list))
+
+p1  <- compareInteractions(cellchat, show.legend = F, group = c(1,2))
+p2 <- compareInteractions(cellchat, show.legend = F, group = c(1,2), measure = "weight")
+p1+p2
+par(mfrow = c(1,1), xpd=TRUE)
+p3 <- netVisual_diffInteraction(cellchat, weight.scale = T,edge.label.cex = 3,vertex.label.cex = 2,title.name = "",vertex.size.max = 3)
+pdf("tofu vs untreated choid.pdf",width = 6,height = 5.7)
+p3
+dev.off()
+# text(0,1.5,"TOFU-ACT vs Untreated Number of Interactions",cex = 2)
+
+# Untreated Number of interactions
+p4 <- netVisual_circle(cellchat.untreated@net$count, vertex.weight = groupSize.untreated, weight.scale = T, label.edge= F, title.name = "",edge.label.cex = 3,vertex.label.cex = 2)
+pdf("Untreated Number of interactions.pdf",width = 6,height = 5.7)
+p4
+dev.off()
+
+p5 <- netVisual_circle(cellchat.tofu@net$count, vertex.weight = groupSize.tofu, weight.scale = T, label.edge= F, title.name = "",edge.label.cex = 3,vertex.label.cex = 2)
+pdf("TOFU-ACT Number of interactions.pdf",width = 6,height = 5.7)
+p5
+dev.off()
+p6 <- netVisual_circle(cellchat.9gy@net$count, vertex.weight = groupSize.9gy, weight.scale = T, label.edge= F, title.name = "",edge.label.cex = 3,vertex.label.cex = 2)
+pdf("9gy TBI Number of interactions.pdf",width = 6,height = 5.7)
+p6
+dev.off()
+
+p7 <- netVisual_heatmap(cellchat, measure = "weight",font.size = 14,font.size.title = 16) + xlab("Targets (Receiver)")
+
+pdf("tofu_vs_untreated_heatmap.pdf",width = 7,height = 5)
+p7
+dev.off()
+
+num.link <- sapply(object.list, function(x) {rowSums(x@net$count) + colSums(x@net$count)-diag(x@net$count)})
+weight.MinMax <- c(min(num.link), max(num.link)) # control the dot size in the different datasets
+gg <- list()
+
+for (i in 1:length(object.list)) {
+  gg[[i]] <- netAnalysis_signalingRole_scatter(object.list[[i]], title = names(object.list)[i], weight.MinMax = weight.MinMax)
+}
+#> Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+#> Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+p8 <- patchwork::wrap_plots(plots = gg)
+
+p9 <- netAnalysis_signalingChanges_scatter(cellchat, idents.use = "CD8 Tcm",label.size = 5)
+p10 <- netAnalysis_signalingChanges_scatter(cellchat, idents.use = "CD4 Tem/eff",label.size = 5)
+## All LRs
+p11 <- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = TRUE,font.size = 9)+theme(legend.text=element_text(size=12),title = element_text(size = 12))
+
+pdf("all interactions waterfall.pdf",width = 8,height = 12)
+p11
+dev.off()
+
+color.use = rev((ggPalette(2)))
+tol <- 0.05
+cutoff.pvalue <- 0.05
+
+p11.2<- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = FALSE,font.size = 10)+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+
+pdf("all_interactions_no_stats.pdf",width = 5,height = 12)
+p11.2
+dev.off()
+
+## CD8 Tcm
+p12<- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = TRUE,targets.use = "CD8 Tcm",font.size = 10)+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+p12.4<- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = FALSE,targets.use = "CD8 Tcm",font.size = 10)+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+pdf("cd8_tcm_no_stats.pdf",width = 5,height = 8)
+p12.4
+dev.off()
+
+
+pdf("cd8_m1_m2_dc_tcm_no_stats.pdf",width = 5,height = 8)
+rankNet(cellchat, mode = "comparison", stacked = T, do.stat = F,targets.use = "CD8 Tcm",font.size = 10,sources.use = c("M1 MF","DC","M2 MF"))+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+dev.off()
+
+
+p12.1<- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = TRUE,targets.use = "CD8 Tcm",font.size = 10,sources.use = c("Tumor"))+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+
+p12.2<- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = TRUE,targets.use = "CD8 Tcm",font.size = 10,sources.use = c("M1 MF","DC","M2 MF"))+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+
+df <- p12.2$data
+for(i in unique(p12.2$data$name)){
+  targets.use = "CD8 Tcm"
+  sources.use = c("M1 MF","DC","M2 MF")
+  df1 <- df.net.untreated[df.net.untreated$pathway_name == i & df.net.untreated$target == targets.use & df.net.untreated$source %in% sources.use,] %>% select(id,prob,pathway_name)
+  df2 <- df.net.tofu[df.net.tofu$pathway_name == i & df.net.tofu$target == targets.use & df.net.tofu$source %in% sources.use,]%>% select(id,prob,pathway_name)
+  if(!rlang::is_empty(setdiff(df2$id,df1$id))){
+  df1 <- rbind(df1,data.frame(id=setdiff(df2$id,df1$id),prob=0,pathway_name=i)) %>% arrange(.$id)
+  } else {df1 <- df1 %>% arrange(.$id)}
+  if(!rlang::is_empty(setdiff(df1$id,df2$id))){
+  df2 <- rbind(df2,data.frame(id=setdiff(df1$id,df2$id),prob=0,pathway_name=i))%>% arrange(.$id)
+  } else {df2 <- df2 %>% arrange(.$id)}
+df$pvalues[df$name == i] <- wilcox.test(df1$prob,df2$prob,paired = T)$p.value
+}
+df$group <- factor(df$group,levels = c("TOFU","Untreated"))
+
+
+colors.text <- ifelse((df$contribution.relative < 
+                  1 - tol) & (df$pvalues < cutoff.pvalue), color.use[2], 
+                  ifelse((df$contribution.relative > 1 + tol) & 
+                    df$pvalues < cutoff.pvalue, color.use[1], 
+                    "black"))
+
+p12.2 <- ggplot(df, aes(x = name, y = contribution, 
+                fill = group)) + geom_bar(stat = "identity", 
+                width = 0.75, position = "fill")+ xlab("") + ylab("Relative information flow")+geom_hline(yintercept = 0.5, linetype = "dashed", color = "grey50", size = 0.5)+ CellChat_theme_opts() + theme_classic() + coord_flip() + theme(axis.text.y = element_text(colour = (colors.text)))+ scale_fill_manual(name = "", values = rev(color.use))
+
+pdf("CD8 tcm vs APC.pdf",width = 5,height = 7)
+p12.2
+dev.off()
+
+p12.3<- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = FALSE,targets.use = "CD8 Tcm",font.size = 10,sources.use = c("M1 MF","DC","M2 MF"))+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+
+
+
+
+## CD8 Tem/eff
+p13 <- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = TRUE,targets.use = "CD8 Tem/eff",font.size = 10)+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+
+pdf("cd8_tem_all_no_stats.pdf",width = 5,height = 8)
+
+p13.4<- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = FALSE,targets.use = "CD8 Tem/eff",font.size = 10)+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+dev.off()
+
+pdf("cd8_tem_m1_m2_dc_no_stats.pdf",width = 5,height = 8)
+rankNet(cellchat, mode = "comparison", stacked = T, do.stat = F,targets.use = "CD8 Tem/eff",font.size = 10,sources.use = c("M1 MF","DC","M2 MF"))+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+dev.off()
+
+p13.1<- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = TRUE,targets.use = "CD8 Tem/eff",font.size = 10,sources.use = c("Tumor"))+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+
+p13.2<- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = TRUE,targets.use = "CD8 Tem/eff",font.size = 10,sources.use = c("M1 MF","DC","M2 MF"))+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+
+df <- p13.2$data
+for(i in unique(p13.2$data$name)){
+  targets.use = "CD8 Tem/eff"
+  sources.use = c("M1 MF","DC","M2 MF")
+  df1 <- df.net.untreated[df.net.untreated$pathway_name == i & df.net.untreated$target == targets.use & df.net.untreated$source %in% sources.use,] %>% select(id,prob,pathway_name)
+  df2 <- df.net.tofu[df.net.tofu$pathway_name == i & df.net.tofu$target == targets.use & df.net.tofu$source %in% sources.use,]%>% select(id,prob,pathway_name)
+  if(!rlang::is_empty(setdiff(df2$id,df1$id))){
+  df1 <- rbind(df1,data.frame(id=setdiff(df2$id,df1$id),prob=0,pathway_name=i)) %>% arrange(.$id)
+  } else {df1 <- df1 %>% arrange(.$id)}
+  if(!rlang::is_empty(setdiff(df1$id,df2$id))){
+  df2 <- rbind(df2,data.frame(id=setdiff(df1$id,df2$id),prob=0,pathway_name=i))%>% arrange(.$id)
+  } else {df2 <- df2 %>% arrange(.$id)}
+df$pvalues[df$name == i] <- wilcox.test(df1$prob,df2$prob,paired = T)$p.value
+}
+df$group <- factor(df$group,levels = c("TOFU","Untreated"))
+
+
+colors.text <- ifelse((df$contribution.relative < 
+                  1 - tol) & (df$pvalues < cutoff.pvalue), color.use[2], 
+                  ifelse((df$contribution.relative > 1 + tol) & 
+                    df$pvalues < cutoff.pvalue, color.use[1], 
+                    "black"))
+
+p13.2 <- ggplot(df, aes(x = name, y = contribution, 
+                fill = group)) + geom_bar(stat = "identity", 
+                width = 0.75, position = "fill")+ xlab("") + ylab("Relative information flow")+geom_hline(yintercept = 0.5, linetype = "dashed", color = "grey50", size = 0.5)+ CellChat_theme_opts() + theme_classic() + coord_flip() + theme(axis.text.y = element_text(colour = (colors.text)))+ scale_fill_manual(name = "", values = rev(color.use))
+
+pdf("CD8 tem vs APC.pdf",width = 5,height = 7)
+p13.2
+dev.off()
+
+
+
+p13.3<- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = FALSE,targets.use = "CD8 Tem/eff",font.size = 10,sources.use = c("M1 MF","DC","M2 MF"))+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+
+
+#CD4 tcm
+p14 <- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = TRUE,targets.use = "CD4 Tcm",font.size = 10)+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+
+pdf("cd4_tcm_all_no_stats.pdf",width = 5,height = 8)
+rankNet(cellchat, mode = "comparison", stacked = T, do.stat = FALSE,targets.use = "CD4 Tcm",font.size = 10)+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+dev.off()
+
+pdf("cd4_tcm_m1_m2_dc_no_stats.pdf",width = 5,height = 8)
+rankNet(cellchat, mode = "comparison", stacked = T, do.stat = F,targets.use = "CD4 Tcm",font.size = 10,sources.use = c("M1 MF","DC","M2 MF"))+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+dev.off()
+
+
+
+p14.1<- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = FALSE,targets.use = "CD4 Tcm",font.size = 10,sources.use = c("Tumor"))+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+
+p14.2<- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = TRUE,targets.use = "CD4 Tcm",font.size = 10,sources.use = c("M1 MF","DC","M2 MF"))+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+
+df <- p14.2$data
+for(i in unique(p14.2$data$name)){
+  targets.use = "CD4 Tcm"
+  sources.use = c("M1 MF","DC","M2 MF")
+  df1 <- df.net.untreated[df.net.untreated$pathway_name == i & df.net.untreated$target == targets.use & df.net.untreated$source %in% sources.use,] %>% select(id,prob,pathway_name)
+  df2 <- df.net.tofu[df.net.tofu$pathway_name == i & df.net.tofu$target == targets.use & df.net.tofu$source %in% sources.use,]%>% select(id,prob,pathway_name)
+  if(!rlang::is_empty(setdiff(df2$id,df1$id))){
+  df1 <- rbind(df1,data.frame(id=setdiff(df2$id,df1$id),prob=0,pathway_name=i)) %>% arrange(.$id)
+  } else {df1 <- df1 %>% arrange(.$id)}
+  if(!rlang::is_empty(setdiff(df1$id,df2$id))){
+  df2 <- rbind(df2,data.frame(id=setdiff(df1$id,df2$id),prob=0,pathway_name=i))%>% arrange(.$id)
+  } else {df2 <- df2 %>% arrange(.$id)}
+df$pvalues[df$name == i] <- wilcox.test(df1$prob,df2$prob,paired = T)$p.value
+}
+df$group <- factor(df$group,levels = c("TOFU","Untreated"))
+
+
+colors.text <- ifelse((df$contribution.relative < 
+                  1 - tol) & (df$pvalues < cutoff.pvalue), color.use[2], 
+                  ifelse((df$contribution.relative > 1 + tol) & 
+                    df$pvalues < cutoff.pvalue, color.use[1], 
+                    "black"))
+
+p14.2 <- ggplot(df, aes(x = name, y = contribution, 
+                fill = group)) + geom_bar(stat = "identity", 
+                width = 0.75, position = "fill")+ xlab("") + ylab("Relative information flow")+geom_hline(yintercept = 0.5, linetype = "dashed", color = "grey50", size = 0.5)+ CellChat_theme_opts() + theme_classic() + coord_flip() + theme(axis.text.y = element_text(colour = (colors.text)))+ scale_fill_manual(name = "", values = rev(color.use))
+
+pdf("CD4 tcm vs APC.pdf",width = 5,height = 7)
+p14.2
+dev.off()
+
+
+
+p14.3<- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = FALSE,targets.use = "CD4 Tcm",font.size = 10,sources.use = c("M1 MF","DC","M2 MF"))+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+
+
+
+
+#CD4 tem/eff 
+p15 <- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = TRUE,targets.use = "CD4 Tem/eff",font.size = 10)+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+pdf("CD4 tem vs all.pdf",width = 5,height = 7)
+p15
+dev.off()
+
+pdf("cd4_tem_all_no_stats.pdf",width = 5,height = 8)
+rankNet(cellchat, mode = "comparison", stacked = T, do.stat = FALSE,targets.use = "CD4 Tem/eff",font.size = 10)+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+dev.off()
+pdf("cd4_tem_m1_m2_dc_no_stats.pdf",width = 5,height = 8)
+rankNet(cellchat, mode = "comparison", stacked = T, do.stat = F,targets.use = "CD4 Tem/eff",font.size = 10,sources.use = c("M1 MF","DC","M2 MF"))+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+dev.off()
+
+pdf("CD4 tem vs all no stat.pdf",width = 5,height = 7)
+p15.4
+dev.off()
+p15.1<- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = FALSE,targets.use = "CD4 Tem/eff",font.size = 10,sources.use = c("Tumor"))+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+pdf("CD4 tem vs tumor.pdf",width = 5,height = 7)
+p15.1
+dev.off()
+p15.2<- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = TRUE,targets.use = "CD4 Tem/eff",font.size = 10,sources.use = c("M1 MF","DC","M2 MF"))+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+
+df <- p15.2$data
+for(i in unique(p15.2$data$name)){
+  targets.use = "CD4 Tem/eff"
+  sources.use = c("M1 MF","DC","M2 MF")
+  df1 <- df.net.untreated[df.net.untreated$pathway_name == i & df.net.untreated$target == targets.use & df.net.untreated$source %in% sources.use,] %>% select(id,prob,pathway_name)
+  df2 <- df.net.tofu[df.net.tofu$pathway_name == i & df.net.tofu$target == targets.use & df.net.tofu$source %in% sources.use,]%>% select(id,prob,pathway_name)
+  if(!rlang::is_empty(setdiff(df2$id,df1$id))){
+  df1 <- rbind(df1,data.frame(id=setdiff(df2$id,df1$id),prob=0,pathway_name=i)) %>% arrange(.$id)
+  } else {df1 <- df1 %>% arrange(.$id)}
+  if(!rlang::is_empty(setdiff(df1$id,df2$id))){
+  df2 <- rbind(df2,data.frame(id=setdiff(df1$id,df2$id),prob=0,pathway_name=i))%>% arrange(.$id)
+  } else {df2 <- df2 %>% arrange(.$id)}
+df$pvalues[df$name == i] <- wilcox.test(df1$prob,df2$prob,paired = T)$p.value
+}
+df$group <- factor(df$group,levels = c("TOFU","Untreated"))
+
+
+colors.text <- ifelse((df$contribution.relative < 
+                  1 - tol) & (df$pvalues < cutoff.pvalue), color.use[2], 
+                  ifelse((df$contribution.relative > 1 + tol) & 
+                    df$pvalues < cutoff.pvalue, color.use[1], 
+                    "black"))
+
+p15.2 <- ggplot(df, aes(x = name, y = contribution, 
+                fill = group)) + geom_bar(stat = "identity", 
+                width = 0.75, position = "fill")+ xlab("") + ylab("Relative information flow")+geom_hline(yintercept = 0.5, linetype = "dashed", color = "grey50", size = 0.5)+ CellChat_theme_opts() + theme_classic() + coord_flip() + theme(axis.text.y = element_text(colour = (colors.text)))+ scale_fill_manual(name = "", values = rev(color.use))
+
+pdf("CD4 tem vs APC.pdf",width = 5,height = 7)
+p15.2
+dev.off()
+
+
+
+
+pdf("CD4 tem vs apc.pdf",width = 5,height = 7)
+p15.2
+dev.off()
+p15.3<- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = FALSE,targets.use = "CD4 Tem/eff",font.size = 10,sources.use = c("M1 MF","DC","M2 MF"))+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+pdf("CD4 tem vs apc no stat.pdf",width = 5,height = 7)
+p15.3
+dev.off()
+
+p16 <- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = TRUE,targets.use = "Treg",font.size = 10)+theme(legend.text=element_text(size=14),title = element_text(size = 15))
+
+object.list <- list(TOFU=cellchat.tofu,HSC=cellchat.9gy,Untreated=cellchat.untreated)
+
+pathways.show <- c("MHC-I") 
+weight.max <- getMaxWeight(object.list, slot.name = c("netP"), attribute = pathways.show) # control the edge weights across different datasets
+par(mfrow = c(1,3), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_aggregate(object.list[[i]], signaling = pathways.show, layout = "circle", edge.weight.max = weight.max[1], edge.width.max = 10, signaling.name = paste(pathways.show, names(object.list)[i]),vertex.label.cex = 2,pt.title = 16)
+}
+
+
+pathways.show <- c("MHC-II") 
+weight.max <- getMaxWeight(object.list, slot.name = c("netP"), attribute = pathways.show) # control the edge weights across different datasets
+par(mfrow = c(1,3), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_aggregate(object.list[[i]], signaling = pathways.show, layout = "circle", edge.weight.max = weight.max[1], edge.width.max = 10, signaling.name = paste(pathways.show, names(object.list)[i]),vertex.label.cex = 2,pt.title = 16)
+}
+
+
+```
+
+
+
+## DEG
+
+```{r}
+require(limma)
+deg_t <- vector('list',6)
+count <- GetAssayData(immune.combined.t, assay = "RNA", slot = "count")
+count <- as.data.frame(count) %>% dplyr::select((immune.combined.t@meta.data %>% filter(Group=="Untreated") %>% rownames()),immune.combined.t@meta.data %>% filter(Group=="TOFU-ACT") %>% rownames())
+
+untreated_obj <- subset(immune.combined.t,cells=(immune.combined.t@meta.data %>% filter(Group=="Untreated") %>% rownames()))
+TOFU_ACT_obj <- subset(immune.combined.t,cells=(immune.combined.t@meta.data %>% filter(Group=="TOFU-ACT") %>% rownames()))
+for (x in ((immune.combined.t$celltype %>% table())[immune.combined.t$celltype %>% table() >0] %>% names())){
+  mat <- count %>% dplyr::select(WhichCells(untreated_obj, idents = x),WhichCells(TOFU_ACT_obj, idents = x))
+  untreated_length <- WhichCells(untreated_obj, idents = x) %>% length()
+  TOFU_ACT_length<- WhichCells(TOFU_ACT_obj, idents = x) %>% length()
+  group_RNAseq=as.factor(c(rep("untreated",untreated_length),rep("TOFU",TOFU_ACT_length)))
+design_RNAseq <- model.matrix(~0+group_RNAseq)
+colnames(design_RNAseq) <- levels(group_RNAseq)
+v_RNAseq <- voom(mat,design_RNAseq,plot=FALSE)
+vfit_RNAseq <- lmFit(v_RNAseq,design_RNAseq)
+contras.matrix <- makeContrasts(TOFU-untreated,levels = design_RNAseq)
+v_RNAseq <- contrasts.fit(vfit_RNAseq,contrasts = contras.matrix)
+v_RNAseq <- eBayes(v_RNAseq,trend = TRUE)
+deg_t[[x]] <- topTable(v_RNAseq,number = nrow(v_RNAseq),adjust.method = "BH",sort.by = "none",coef = 1) %>% arrange(desc(logFC))
+}
+
+deg_gene_list <- data.frame()
+
+##all cell types top 5 vs bottom 5 
+for (x in ((immune.combined.t$celltype %>% table())[immune.combined.t$celltype %>% table() >0] %>% names())){
+df <- data.frame(gene_name=rownames(deg_t[[x]][c(1:5,20146:20150),]),celltype=x)
+ deg_gene_list <- rbind(deg_gene_list,df)
+}
+
+## DEG on CD45+ cells
+
+deg <- vector('list',11)
+count <- GetAssayData(immune.combined, assay = "RNA", slot = "count")
+count <- as.data.frame(count) %>% dplyr::select((immune.combined@meta.data %>% filter(Group=="Untreated") %>% rownames()),immune.combined@meta.data %>% filter(Group=="TOFU-ACT") %>% rownames())
+Idents(immune.combined) <- immune.combined$celltype
+untreated_obj <- subset(immune.combined,cells=(immune.combined@meta.data %>% filter(Group=="Untreated") %>% rownames()))
+TOFU_ACT_obj <- subset(immune.combined,cells=(immune.combined@meta.data %>% filter(Group=="TOFU-ACT") %>% rownames()))
+for (x in ((immune.combined$celltype %>% table())[immune.combined$celltype %>% table() >0] %>% names())){
+  mat <- count %>% dplyr::select(WhichCells(untreated_obj, idents = x),WhichCells(TOFU_ACT_obj, idents = x))
+  untreated_length <- WhichCells(untreated_obj, idents = x) %>% length()
+  TOFU_ACT_length<- WhichCells(TOFU_ACT_obj, idents = x) %>% length()
+  group_RNAseq=as.factor(c(rep("untreated",untreated_length),rep("TOFU",TOFU_ACT_length)))
+design_RNAseq <- model.matrix(~0+group_RNAseq)
+colnames(design_RNAseq) <- levels(group_RNAseq)
+v_RNAseq <- voom(mat,design_RNAseq,plot=FALSE)
+vfit_RNAseq <- lmFit(v_RNAseq,design_RNAseq)
+contras.matrix <- makeContrasts(TOFU-untreated,levels = design_RNAseq)
+v_RNAseq <- contrasts.fit(vfit_RNAseq,contrasts = contras.matrix)
+v_RNAseq <- eBayes(v_RNAseq,trend = TRUE)
+deg[[x]] <- topTable(v_RNAseq,number = nrow(v_RNAseq),adjust.method = "BH",sort.by = "none",coef = 1) %>% arrange(desc(logFC))
+}
+
+deg_gene_list_all <- data.frame()
+
+##all cell types top 10 vs bottom 10 
+for (x in ((immune.combined$celltype %>% table())[immune.combined$celltype %>% table() >0] %>% names())){
+df <- data.frame(gene_name=rownames(deg[[x]][c(1:10,20141:20150),]),celltype=x)
+ deg_gene_list_all <- rbind(deg_gene_list_all,df)
+}
+
+##DEG Tumor
+deg_tumor <- vector('list',8)
+count <- GetAssayData(pool4_obj, assay = "RNA", slot = "count")
+count <- as.data.frame(count) %>% dplyr::select((pool4_obj@meta.data %>% filter(Group=="Untreated") %>% rownames()),pool4_obj@meta.data %>% filter(Group=="TOFU-ACT") %>% rownames())
+Idents(pool4_obj) <- pool4_obj$celltype
+untreated_obj <- subset(pool4_obj,cells=(pool4_obj@meta.data %>% filter(Group=="Untreated") %>% rownames()))
+TOFU_ACT_obj <- subset(pool4_obj,cells=(pool4_obj@meta.data %>% filter(Group=="TOFU-ACT") %>% rownames()))
+for (x in ((pool4_obj$celltype %>% table())[pool4_obj$celltype %>% table() >0] %>% names())){
+  mat <- count %>% dplyr::select(WhichCells(untreated_obj, idents = x),WhichCells(TOFU_ACT_obj, idents = x))
+  untreated_length <- WhichCells(untreated_obj, idents = x) %>% length()
+  TOFU_ACT_length<- WhichCells(TOFU_ACT_obj, idents = x) %>% length()
+  group_RNAseq=as.factor(c(rep("untreated",untreated_length),rep("TOFU",TOFU_ACT_length)))
+design_RNAseq <- model.matrix(~0+group_RNAseq)
+colnames(design_RNAseq) <- levels(group_RNAseq)
+v_RNAseq <- voom(mat,design_RNAseq,plot=FALSE)
+vfit_RNAseq <- lmFit(v_RNAseq,design_RNAseq)
+contras.matrix <- makeContrasts(TOFU-untreated,levels = design_RNAseq)
+v_RNAseq <- contrasts.fit(vfit_RNAseq,contrasts = contras.matrix)
+v_RNAseq <- eBayes(v_RNAseq,trend = TRUE)
+deg_tumor[[x]] <- topTable(v_RNAseq,number = nrow(v_RNAseq),adjust.method = "BH",sort.by = "none",coef = 1) %>% arrange(desc(logFC))
+}
+
+##need restart r and load the following command first. RAM then xlsx
+options(java.parameters = "-Xmx16000m")
+library(xlsx)
+
+deg_t <- deg_t[lapply(deg_t,length) > 0]
+names(deg_t) <- names(deg_t) %>% str_replace_all(c("/" = "_"))
+for (i in (deg_t %>% names())){
+  write.xlsx(deg_t[i],file="t_deg.xlsx",sheetName = paste(i),append = T)
+  gc()
+}
+
+deg <- deg[lapply(deg,length) > 0]
+names(deg) <- names(deg) %>% str_replace_all(c("/" = "_"))
+for (i in (deg%>% names())){
+  write.xlsx(deg[i],file="immune_deg.xlsx",sheetName = paste(i),append = T)
+  gc()
+}
+
+deg_tumor <- deg_tumor[lapply(deg_tumor,length) > 0]
+names(deg) <- names(deg) %>% str_replace_all(c("/" = "_"))
+for (i in (deg_tumor%>% names())){
+  write.xlsx(deg_tumor[i],file="tumor_deg.xlsx",sheetName = paste(i),append = T)
+  gc()
+}
+
+```
+
+## revise, recluster macrophage to microglia
+```{r}
+rm(list=ls())
+load("NS2875.RData")
+
+
+
+##CD45+, add main annotation
+immgen <- ImmGenData()
+require(scran)
+pred.immune <- SingleR(GetAssayData(immune.combined, assay = "integrated", slot = "data"), clusters = immune.combined$seurat_clusters,de.method = "wilcox",ref = immgen, assay.type.test = "TPM",labels =immgen$label.main,recompute = TRUE)
+
+
+
+new.cluster.id <- pred.immune$labels
+new.cluster.id[13] <- "NK cells"
+new.cluster.id[10] <- "T cells"
+##if macrophages need to be splitted
+new.cluster.id <- str_replace_all(new.cluster.id,c("Macrophages" = "M2 Macrophages"))
+new.cluster.id[2] <- "M1 Macrophages"
+new.cluster.id[5] <- "M1 Macrophages"
+names(new.cluster.id) <- immune.combined$seurat_clusters %>% levels()
+immune.combined@active.ident <- as.factor(immune.combined$seurat_clusters)
+immune.combined <- RenameIdents(immune.combined,new.cluster.id)
+immune.combined$celltype <- Idents(immune.combined)
+
+
+
+group_color <- c("#DDCC77","#888888","#88CCEE","#CC6677")
+
+
+
+immune.combined <- subset(immune.combined,cells = rownames(immune.combined@meta.data %>% filter(Group != "ttRNA-ACT") ))
+immune.combined@meta.data$group <- str_replace_all(immune.combined@meta.data$group,c("HSC alone"="9Gy TBI"))
+immune.combined@meta.data$group <- factor(immune.combined@meta.data$group,levels=c("Untreated (n=15,000)","9Gy TBI (n=15,000)","TOFU-ACT (n=15,000)"))
+Idents(immune.combined) <- str_replace_all(Idents(immune.combined),c("M1 Macrophages" = "M1 Macrophages/\n Microglia"))
+names(immune_color) <- str_replace_all(names(immune_color),c("M1 Macrophages" = "M1 Macrophages/\n Microglia"))
+# Idents(immune.combined) <- str_replace_all(Idents(immune.combined),c("M2 Macrophages" = "Macrophages"))
+
+
+immune_col_table <- immune_col_table %>% mutate(immune_col_1=new.ident)
+immune_col_table$immune_col_1 <- str_replace_all(immune_col_table$immune_col_1,c("M1 Macrophages" = "Microglia","M2 Macrophages" = "Macrophages"))
+immune_color <- immune_col_table$immune_color
+names(immune_color) <- immune_col_table$immune_col_1
+
+immune_p1 <- DimPlot(immune.combined, reduction = "umap", repel = TRUE,label = TRUE,label.size = 7,split.by = "group",cols=immune_color) & theme(legend.position = "none",title = element_text(size = 15),strip.text.x=element_text(size=20,color="black"))
+
+
+r_p1 <- FeaturePlot(immune.combined,features = c("Klra7","Foxp3","Cd3d","Cd3e","Cd8a","Cd14","Cd68"))
+
+layout(matrix(1:8, nrow = 2, ncol = 4))
+r_p2 <- FeaturePlot(immune.combined,features = c("Klra7","Foxp3","Cd3d","Cd3e","Cd8a","Cd14","Cd68","Adgre1","Tmem119","Cx3cr1","Selplg","Siglech","Itga4","Tgfbi","Ifitm2"))
+r_p3 <- FeaturePlot(immune.combined,features = c("Itgam","Ly6g","Ly6g6c"))
+r_p4 <- FeaturePlot(immune.combined,features = c("Cd40","Nos2","Cd86","Tnf","Chil3","Arg1","Retnla","Mgl2","Adgre1","Lyz2","Ptprc","luciferase","Cd3e","Cd3d","Cd79a","Klra7"))
+
+
+r_p5 <- FeaturePlot(immune.combined,features = c("Klra7","Cd3d","Cd3e","Cd8a","Ly6g","Ly6g6c","Cd14","Cd68","Tmem119","Cx3cr1","Selplg","Siglech","Itga4","Tgfbi","Ifitm2","Adgre1","Cd40","Nos2","Cd86","Tnf","Chil3","Arg1","Retnla","Mgl2"))
+
+immune.combined@meta.data$Group <- str_replace_all(immune.combined@meta.data$Group,c("HSC alone"="9Gy TBI"))
+immune.combined@meta.data$Group <- factor(immune.combined@meta.data$Group,levels=c("Untreated","9Gy TBI","TOFU-ACT"))
+r_p6<- FeaturePlot(immune.combined,features = c("Mki67","Cd69"),split.by="Group")
+
+
+immune.combined.t <- subset(immune.combined.t,cells = rownames(immune.combined.t@meta.data %>% filter(Group != "ttRNA-ACT") ))
+immune.combined.t$Group <- str_replace_all(immune.combined.t$Group,c("HSC alone"="9Gy TBI"))
+immune.combined.t$Group <- factor(immune.combined.t$Group,levels=c("Untreated","9Gy TBI","TOFU-ACT"))
+r_p7<- FeaturePlot(immune.combined.t,features = c("Mki67","Cd69"),split.by="Group")
+
+
+immune.combined.myloid <- subset(immune.combined,cells = rownames(immune.combined@meta.data %>% filter(celltype %in% c("M2 Macrophages","M1 Macrophages","DC","Moncytes","Neutrophils","Monocytes")) ))
+Idents(immune.combined.myloid) <- str_replace_all(Idents(immune.combined.myloid),c("Macrophages" = "M2 Like Macrophages","Microglia"="M1 Like Macropahges"))
+
+
+cell_count_of_ea_sample <- immune.combined@meta.data %>% select(celltype,group,Sample) %>% mutate(celltype=str_replace_all(celltype,c("M1 Macrophages" = "Microglia","M2 Macrophages" = "Macrophages"))) %>% group_by(group,Sample) %>% table()
+
+write.table(cell_count_of_ea_sample,"cell_count_per_sample.txt",sep = "\t",quote = F)
+
+immune.combined.myloid$celltype <- str_replace_all(immune.combined.myloid$celltype,c("M2 Macrophages" = "M2 Like Macrophages","M1 Macrophages"="M1 Like Macrophages")) 
+##immune color for myloid
+#### immune color
+immune.combined.myloid$new.ident <- NULL
+#### immune color
+control_freq <- immune.combined.myloid@meta.data %>% filter(Group=="Untreated") %>% freq_table(celltype) %>%
+  mutate(new.ident=paste0(celltype," (",prop,"%)"))
+control_freq <- immune.combined.myloid@meta.data %>% filter(Group=="Untreated") %>% left_join(control_freq,by="celltype") %>% dplyr::select(celltype,new.ident)
+rownames(control_freq) <- rownames(immune.combined.myloid@meta.data %>% filter(Group=="Untreated"))
+hsc_freq <- immune.combined.myloid@meta.data %>% filter(Group=="9Gy TBI") %>% freq_table(celltype) %>%
+  mutate(new.ident=paste0(celltype," (",prop,"%)"))
+hsc_freq <- immune.combined.myloid@meta.data %>% filter(Group=="9Gy TBI") %>% left_join(hsc_freq,by="celltype") %>% dplyr::select(celltype,new.ident)
+rownames(hsc_freq) <- rownames(immune.combined.myloid@meta.data %>% filter(Group=="9Gy TBI"))
+
+tofu_freq <- immune.combined.myloid@meta.data %>% filter(Group=="TOFU-ACT") %>% freq_table(celltype) %>%
+  mutate(new.ident=paste0(celltype," (",prop,"%)"))
+tofu_freq <- immune.combined.myloid@meta.data %>% filter(Group=="TOFU-ACT") %>% left_join(tofu_freq,by="celltype") %>% dplyr::select(celltype,new.ident)
+rownames(tofu_freq) <- rownames(immune.combined.myloid@meta.data %>% filter(Group=="TOFU-ACT"))
+
+immune_freq <- rbind(control_freq,hsc_freq,tofu_freq)
+
+immune_color <- data.frame(color=c("#888888","#CC6677","#332288","#999933","#661100"),celltype=c("M2 Like Macrophages","M1 Like Macrophages","DC","Neutrophils","Monocytes"))
+
+immune_freq <- as.character(immune_freq$new.ident)
+names(immune_freq) <- rownames(immune.combined.myloid@meta.data)
+immune.combined.myloid <- AddMetaData(immune.combined.myloid,immune_freq,col.name = "new.ident")
+immune.combined.myloid@active.ident <- as.factor(immune_freq)
+immune_col_table <- immune.combined.myloid@meta.data %>% select(new.ident,celltype) %>% left_join(immune_color)
+rownames(immune_col_table) <- rownames(immune.combined.myloid@meta.data)
+
+immune_color <- immune_col_table$color
+names(immune_color) <- immune_col_table$new.ident
+
+immune.combined.myloid@meta.data$group <- c(rep("Untreated (n=13,030)",13030),rep("9Gy TBI (n=14,085)",14085),rep("TOFU-ACT (n=13,396)",13396))
+
+immune.combined.myloid@meta.data$group <- factor(immune.combined.myloid@meta.data$group,levels = c("Untreated (n=13,030)","9Gy TBI (n=14,085)","TOFU-ACT (n=13,396)"))
+immune_p2 <- DimPlot(immune.combined.myloid, reduction = "umap", repel = TRUE,label = TRUE,label.size = 7,split.by = "group",cols=immune_color) & theme(legend.position = "none",title = element_text(size = 15),strip.text.x=element_text(size=20,color="black"))
+```
+
